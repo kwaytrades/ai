@@ -57,31 +57,28 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     if df.empty or not all(col in df.columns for col in ['Open', 'High', 'Low', 'Close', 'Volume']):
         return {"error": f"No valid OHLCV data found for {ticker} with interval {interval} and period {period}."}
 
-    # Convert columns to numeric
     for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
     df = df.dropna()
-    if df.empty:
-        return {"error": f"Data for {ticker} is empty after cleaning."}
+    if len(df) < 50:  # Need enough candles for indicators
+        return {"error": f"Not enough data points for {ticker} to compute indicators."}
 
     close_series = df['Close']
     high_series = df['High']
     low_series = df['Low']
 
-    # Validate close_series is non-empty and > 1 element
-    if close_series.empty or len(close_series) < 2:
-        return {"error": f"Not enough data points for {ticker} to compute indicators."}
-
-    # Indicators
-    df['RSI'] = ta.rsi(close_series, length=14)
-    macd = ta.macd(close_series, fast=12, slow=26, signal=9)
-    df['EMA_20'] = ta.ema(close_series, length=20)
-    df['EMA_50'] = ta.ema(close_series, length=50)
-    df['EMA_200'] = ta.ema(close_series, length=200)
-    bbands = ta.bbands(close_series, length=20, std=2)
-    df['ATR'] = ta.atr(high_series, low_series, close_series, length=14)
-    df['VWAP'] = calculate_vwap(df)
+    try:
+        df['RSI'] = ta.rsi(close_series, length=14)
+        macd = ta.macd(close_series, fast=12, slow=26, signal=9)
+        df['EMA_20'] = ta.ema(close_series, length=20)
+        df['EMA_50'] = ta.ema(close_series, length=50)
+        df['EMA_200'] = ta.ema(close_series, length=200)
+        bbands = ta.bbands(close_series, length=20, std=2)
+        df['ATR'] = ta.atr(high_series, low_series, close_series, length=14)
+        df['VWAP'] = calculate_vwap(df)
+    except Exception as e:
+        return {"error": f"Indicator calculation failed: {str(e)}"}
 
     latest = df.iloc[-1]
     s_r = find_support_resistance(df)
@@ -179,12 +176,23 @@ def signals_endpoint():
 
 @app.route("/debug", methods=["GET"])
 def debug_endpoint():
-    """Debug endpoint to return last 5 rows of raw OHLCV data."""
     ticker = request.args.get("ticker", "AAPL")
     interval = request.args.get("interval", "1d")
     period = request.args.get("period", "1mo")
     df = fetch_ohlcv(ticker, interval, period)
     return jsonify(df.tail(5).to_dict(orient="index"))
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Simple health check for service readiness."""
+    try:
+        df = fetch_ohlcv("AAPL", "1d", "5d")
+        if df.empty:
+            return jsonify({"status": "error", "message": "Unable to fetch test data from yfinance."}), 500
+        last_price = round(df['Close'].iloc[-1], 2)
+        return jsonify({"status": "ok", "message": "Service is healthy.", "last_price": last_price})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/", methods=["GET"])
 def root():
@@ -195,5 +203,3 @@ def root():
 # ---------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
-
