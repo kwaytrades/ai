@@ -12,9 +12,8 @@ app = Flask(__name__)
 
 def fetch_ohlcv(ticker, interval='1h', period='1mo'):
     """Fetch OHLCV data from Yahoo Finance."""
-    # Added auto_adjust=True to silence the FutureWarning
     data = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-    data = data.dropna()
+    # No need to dropna here, we will check if the dataframe is empty later
     return data
 
 def calculate_vwap(df):
@@ -42,7 +41,6 @@ def find_support_resistance(df, num_levels=2):
     highs = df['High'].rolling(window=5, center=True).max()
     lows = df['Low'].rolling(window=5, center=True).min()
 
-    # FIX: Added .squeeze() to convert single-column DataFrame to a Series before calling .unique()
     resistance_levels = sorted(highs.dropna().squeeze().unique())[-num_levels:]
     support_levels = sorted(lows.dropna().squeeze().unique())[:num_levels]
 
@@ -54,6 +52,14 @@ def find_support_resistance(df, num_levels=2):
 def calculate_indicators(ticker, interval='1h', period='1mo'):
     """Calculate all technical indicators."""
     df = fetch_ohlcv(ticker, interval, period)
+
+    # --- START OF NEW CODE ---
+    # FIX: Check if the DataFrame is empty. If so, return an error.
+    if df.empty:
+        return {"error": f"Could not retrieve data for ticker {ticker}. It may be an invalid ticker or no data for the selected period/interval."}
+    
+    df = df.dropna() # Drop NA values after confirming dataframe is not empty
+    # --- END OF NEW CODE ---
 
     # Basic Indicators
     df['RSI'] = ta.rsi(df['Close'], length=14)
@@ -98,6 +104,12 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
 
 def generate_signals(data):
     """Generate human-readable trade signals."""
+    # --- START OF NEW CODE ---
+    # Check if data contains an error from the calculation step
+    if "error" in data:
+        return [data["error"]]
+    # --- END OF NEW CODE ---
+        
     signals = []
 
     if data['rsi'] > 70:
@@ -128,20 +140,42 @@ def ta_endpoint():
     ticker = request.args.get("ticker", "AAPL")
     interval = request.args.get("interval", "1h")
     period = request.args.get("period", "1mo")
-    data = calculate_indicators(ticker, interval, period)
-    return jsonify(data)
+    
+    # --- START OF NEW CODE ---
+    # Use a try-except block to catch any unexpected errors
+    try:
+        data = calculate_indicators(ticker, interval, period)
+        if "error" in data:
+            # Return a 400 Bad Request if there was an issue with the ticker
+            return jsonify(data), 400
+        return jsonify(data)
+    except Exception as e:
+        # Return a 500 Internal Server Error for any other crash
+        return jsonify({"error": "An unexpected server error occurred.", "details": str(e)}), 500
+    # --- END OF NEW CODE ---
 
 @app.route("/signals", methods=["GET"])
 def signals_endpoint():
     ticker = request.args.get("ticker", "AAPL")
     interval = request.args.get("interval", "1h")
     period = request.args.get("period", "1mo")
-    data = calculate_indicators(ticker, interval, period)
-    signals = generate_signals(data)
-    return jsonify({
-        "ticker": ticker.upper(),
-        "signals": signals
-    })
+
+    # --- START OF NEW CODE ---
+    try:
+        data = calculate_indicators(ticker, interval, period)
+        signals = generate_signals(data)
+        
+        # Check if the signals list contains an error message
+        if "error" in data:
+            return jsonify({"error": signals[0]}), 400
+
+        return jsonify({
+            "ticker": ticker.upper(),
+            "signals": signals
+        })
+    except Exception as e:
+        return jsonify({"error": "An unexpected server error occurred.", "details": str(e)}), 500
+    # --- END OF NEW CODE ---
 
 @app.route("/", methods=["GET"])
 def root():
@@ -152,4 +186,3 @@ def root():
 # ---------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
