@@ -46,8 +46,8 @@ def find_support_resistance(df, num_levels=2):
     support_levels = sorted(lows.dropna().squeeze().unique())[:num_levels]
 
     return {
-        "support_levels": [round(s, 2) for s in support_levels],
-        "resistance_levels": [round(r, 2) for r in resistance_levels]
+        "support_levels": [round(float(s), 2) for s in support_levels],
+        "resistance_levels": [round(float(r), 2) for r in resistance_levels]
     }
 
 def calculate_indicators(ticker, interval='1h', period='1mo'):
@@ -61,7 +61,7 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
     df = df.dropna()
-    if len(df) < 50:  # Need enough candles for indicators
+    if len(df) < 50:
         return {"error": f"Not enough data points for {ticker} to compute indicators."}
 
     close_series = df['Close']
@@ -86,25 +86,25 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     return {
         "ticker": ticker.upper(),
         "interval": interval,
-        "last_price": round(latest['Close'], 2),
-        "rsi": round(latest['RSI'], 2),
+        "last_price": round(float(latest['Close']), 2),
+        "rsi": round(float(latest['RSI']), 2),
         "macd": {
-            "macd": round(macd.iloc[-1]['MACD_12_26_9'], 2),
-            "signal": round(macd.iloc[-1]['MACDs_12_26_9'], 2),
-            "hist": round(macd.iloc[-1]['MACDh_12_26_9'], 2),
+            "macd": round(float(macd.iloc[-1]['MACD_12_26_9']), 2),
+            "signal": round(float(macd.iloc[-1]['MACDs_12_26_9']), 2),
+            "hist": round(float(macd.iloc[-1]['MACDh_12_26_9']), 2),
         },
         "ema": {
-            "ema_20": round(latest['EMA_20'], 2),
-            "ema_50": round(latest['EMA_50'], 2),
-            "ema_200": round(latest['EMA_200'], 2)
+            "ema_20": round(float(latest['EMA_20']), 2),
+            "ema_50": round(float(latest['EMA_50']), 2),
+            "ema_200": round(float(latest['EMA_200']), 2)
         },
         "bollinger": {
-            "upper": round(bbands.iloc[-1]['BBU_20_2.0'], 2),
-            "middle": round(bbands.iloc[-1]['BBM_20_2.0'], 2),
-            "lower": round(bbands.iloc[-1]['BBL_20_2.0'], 2)
+            "upper": round(float(bbands.iloc[-1]['BBU_20_2.0']), 2),
+            "middle": round(float(bbands.iloc[-1]['BBM_20_2.0']), 2),
+            "lower": round(float(bbands.iloc[-1]['BBL_20_2.0']), 2)
         },
-        "atr": round(latest['ATR'], 2),
-        "vwap": round(latest['VWAP'], 2),
+        "atr": round(float(latest['ATR']), 2),
+        "vwap": round(float(latest['VWAP']), 2),
         "support": s_r["support_levels"],
         "resistance": s_r["resistance_levels"],
         "gaps": detect_gaps(df)
@@ -180,16 +180,15 @@ def debug_endpoint():
     interval = request.args.get("interval", "1d")
     period = request.args.get("period", "1mo")
     df = fetch_ohlcv(ticker, interval, period)
-    return jsonify(df.tail(5).to_dict(orient="index"))
+    return jsonify(df.tail(5).reset_index().to_dict(orient="records"))
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Simple health check for service readiness."""
     try:
         df = fetch_ohlcv("AAPL", "1d", "5d")
         if df.empty:
             return jsonify({"status": "error", "message": "Unable to fetch test data from yfinance."}), 500
-        last_price = round(df['Close'].iloc[-1], 2)
+        last_price = round(float(df['Close'].iloc[-1]), 2)
         return jsonify({"status": "ok", "message": "Service is healthy.", "last_price": last_price})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
