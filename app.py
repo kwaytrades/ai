@@ -150,3 +150,19 @@ def root():
 # ---------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
+@app.route("/")
+def home():
+    return "Flask API is running! Use /api/ta?ticker=XYZ"
+
+@app.route("/api/ta", methods=["GET"])
+def technical_analysis():
+    ticker = request.args.get("ticker", "AAPL")
+    df = fetch_ohlcv(ticker)
+    vwap = calculate_vwap(df).iloc[-1]
+    return jsonify({
+        "ticker": ticker,
+        "vwap": round(float(vwap), 2),
+        "latest_close": round(float(df['Close'].iloc[-1]), 2)
+    })
+
