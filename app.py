@@ -54,7 +54,12 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
 
     if df.empty:
         return {"error": f"Could not retrieve data for ticker {ticker}. It may be an invalid ticker or no data for the selected period/interval."}
-    
+
+    # FIX: Explicitly convert OHLCV columns to numeric, coercing errors to NaN
+    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
     df = df.dropna()
 
     if df.empty:
