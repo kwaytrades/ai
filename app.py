@@ -13,7 +13,6 @@ app = Flask(__name__)
 def fetch_ohlcv(ticker, interval='1h', period='1mo'):
     """Fetch OHLCV data from Yahoo Finance."""
     data = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-    # No need to dropna here, we will check if the dataframe is empty later
     return data
 
 def calculate_vwap(df):
@@ -27,7 +26,7 @@ def detect_gaps(df):
     for i in range(len(df)):
         if prev_close is not None:
             gap_percent = (df['Open'].iloc[i] - prev_close) / prev_close * 100
-            if abs(gap_percent) > 1.0:  # Significant gap (>1%)
+            if abs(gap_percent) > 1.0:
                 gaps.append({
                     "date": str(df.index[i].date()),
                     "type": "gap_up" if gap_percent > 0 else "gap_down",
@@ -53,13 +52,14 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     """Calculate all technical indicators."""
     df = fetch_ohlcv(ticker, interval, period)
 
-    # --- START OF NEW CODE ---
-    # FIX: Check if the DataFrame is empty. If so, return an error.
     if df.empty:
         return {"error": f"Could not retrieve data for ticker {ticker}. It may be an invalid ticker or no data for the selected period/interval."}
     
-    df = df.dropna() # Drop NA values after confirming dataframe is not empty
-    # --- END OF NEW CODE ---
+    df = df.dropna()
+
+    # If after dropping NA, the dataframe is empty, return error
+    if df.empty:
+        return {"error": f"Not enough data for {ticker} for the selected period/interval after cleaning."}
 
     # Basic Indicators
     df['RSI'] = ta.rsi(df['Close'], length=14)
@@ -71,7 +71,6 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
     df['VWAP'] = calculate_vwap(df)
 
-    # Results
     latest = df.iloc[-1]
     s_r = find_support_resistance(df)
 
@@ -104,11 +103,8 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
 
 def generate_signals(data):
     """Generate human-readable trade signals."""
-    # --- START OF NEW CODE ---
-    # Check if data contains an error from the calculation step
     if "error" in data:
         return [data["error"]]
-    # --- END OF NEW CODE ---
         
     signals = []
 
@@ -121,6 +117,65 @@ def generate_signals(data):
         signals.append("Price is above VWAP (bullish intraday trend).")
     else:
         signals.append("Price is below VWAP (bearish intraday trend).")
+
+    if data['last_price'] > data['ema']['ema_50']:
+        signals.append("Price is above EMA-50, bullish momentum.")
+    else:
+        signals.append("Price is below EMA-50, caution.")
+
+    signals.append(f"Support near {data['support']}, resistance at {data['resistance']}.")
+
+    return signals
+
+# ---------------------------
+# API Endpoints
+# ---------------------------
+
+@app.route("/ta", methods=["GET"])
+def ta_endpoint():
+    ticker = request.args.get("ticker", "AAPL")
+    # FIX: Changed default interval to '1d' for better reliability on hosting services
+    interval = request.args.get("interval", "1d")
+    period = request.args.get("period", "1mo")
+    
+    try:
+        data = calculate_indicators(ticker, interval, period)
+        if "error" in data:
+            return jsonify(data), 400
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": "An unexpected server error occurred.", "details": str(e)}), 500
+
+@app.route("/signals", methods=["GET"])
+def signals_endpoint():
+    ticker = request.args.get("ticker", "AAPL")
+    # FIX: Changed default interval to '1d' for better reliability on hosting services
+    interval = request.args.get("interval", "1d")
+    period = request.args.get("period", "1mo")
+
+    try:
+        data = calculate_indicators(ticker, interval, period)
+        signals = generate_signals(data)
+        
+        if "error" in data:
+            return jsonify({"error": signals[0]}), 400
+
+        return jsonify({
+            "ticker": ticker.upper(),
+            "signals": signals
+        })
+    except Exception as e:
+        return jsonify({"error": "An unexpected server error occurred.", "details": str(e)}), 500
+
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"message": "TA Microservice is running!"})
+
+# ---------------------------
+# Run App
+# ---------------------------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
 
     if data['last_price'] > data['ema']['ema_50']:
         signals.append("Price is above EMA-50, bullish momentum.")
