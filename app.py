@@ -52,27 +52,32 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     """Calculate all technical indicators."""
     df = fetch_ohlcv(ticker, interval, period)
 
-    if df.empty:
-        return {"error": f"Could not retrieve data for ticker {ticker}. It may be an invalid ticker or no data for the selected period/interval."}
+    if df.empty or 'Close' not in df.columns:
+        return {"error": f"Could not retrieve data for ticker {ticker}. It may be invalid or have no data."}
 
-    # FIX: Explicitly convert OHLCV columns to numeric, coercing errors to NaN
-    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+    # Ensure all OHLCV columns are numeric
+    ohlcv_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+    for col in ohlcv_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    df = df.dropna()
-
+    df = df.dropna(subset=ohlcv_cols)
     if df.empty:
-        return {"error": f"Not enough data for {ticker} for the selected period/interval after cleaning."}
+        return {"error": f"No valid OHLCV data found for {ticker} after cleaning."}
+
+    close_series = df['Close']
+    high_series = df['High']
+    low_series = df['Low']
+    vol_series = df['Volume']
 
     # Basic Indicators
-    df['RSI'] = ta.rsi(df['Close'], length=14)
-    macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
-    df['EMA_20'] = ta.ema(df['Close'], length=20)
-    df['EMA_50'] = ta.ema(df['Close'], length=50)
-    df['EMA_200'] = ta.ema(df['Close'], length=200)
-    bbands = ta.bbands(df['Close'], length=20, std=2)
-    df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+    df['RSI'] = ta.rsi(close_series, length=14)
+    macd = ta.macd(close_series, fast=12, slow=26, signal=9)
+    df['EMA_20'] = ta.ema(close_series, length=20)
+    df['EMA_50'] = ta.ema(close_series, length=50)
+    df['EMA_200'] = ta.ema(close_series, length=200)
+    bbands = ta.bbands(close_series, length=20, std=2)
+    df['ATR'] = ta.atr(high_series, low_series, close_series, length=14)
     df['VWAP'] = calculate_vwap(df)
 
     latest = df.iloc[-1]
@@ -169,6 +174,16 @@ def signals_endpoint():
     except Exception as e:
         return jsonify({"error": "An unexpected server error occurred.", "details": str(e)}), 500
 
+@app.route("/debug", methods=["GET"])
+def debug_endpoint():
+    """Debug endpoint to return raw OHLCV data for testing."""
+    ticker = request.args.get("ticker", "AAPL")
+    df = fetch_ohlcv(ticker)
+    return jsonify({
+        "columns": list(df.columns),
+        "sample_data": df.tail(5).to_dict()
+    })
+
 @app.route("/", methods=["GET"])
 def root():
     return jsonify({"message": "TA Microservice is running!"})
@@ -178,3 +193,4 @@ def root():
 # ---------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
