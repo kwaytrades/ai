@@ -42,16 +42,9 @@ def find_support_resistance(df, num_levels=2):
     highs = df['High'].rolling(window=5, center=True).max()
     lows = df['Low'].rolling(window=5, center=True).min()
 
-    # FIX: Convert numpy array from .unique() to a list before sorting
-    unique_highs = highs.dropna().unique().tolist()
-    unique_lows = lows.dropna().unique().tolist()
-
-    # Sort the lists
-    unique_highs.sort()
-    unique_lows.sort()
-
-    resistance_levels = unique_highs[-num_levels:]
-    support_levels = unique_lows[:num_levels]
+    # FIX: Removed the .squeeze() method call
+    resistance_levels = sorted(highs.dropna().unique())[-num_levels:]
+    support_levels = sorted(lows.dropna().unique())[:num_levels]
 
     return {
         "support_levels": [round(s, 2) for s in support_levels],
