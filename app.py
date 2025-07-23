@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -11,7 +12,8 @@ app = Flask(__name__)
 
 def fetch_ohlcv(ticker, interval='1h', period='1mo'):
     """Fetch OHLCV data from Yahoo Finance."""
-    data = yf.download(ticker, period=period, interval=interval, progress=False)
+    # Added auto_adjust=True to silence the FutureWarning
+    data = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
     data = data.dropna()
     return data
 
@@ -40,8 +42,9 @@ def find_support_resistance(df, num_levels=2):
     highs = df['High'].rolling(window=5, center=True).max()
     lows = df['Low'].rolling(window=5, center=True).min()
 
-    resistance_levels = sorted(highs.dropna().unique())[-num_levels:]
-    support_levels = sorted(lows.dropna().unique())[:num_levels]
+    # FIX: Added .squeeze() to convert single-column DataFrame to a Series before calling .unique()
+    resistance_levels = sorted(highs.dropna().squeeze().unique())[-num_levels:]
+    support_levels = sorted(lows.dropna().squeeze().unique())[:num_levels]
 
     return {
         "support_levels": [round(s, 2) for s in support_levels],
@@ -52,7 +55,7 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     """Calculate all technical indicators."""
     df = fetch_ohlcv(ticker, interval, period)
 
-    # Technical Indicators
+    # Basic Indicators
     df['RSI'] = ta.rsi(df['Close'], length=14)
     macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
     df['EMA_20'] = ta.ema(df['Close'], length=20)
@@ -62,7 +65,7 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
     df['VWAP'] = calculate_vwap(df)
 
-    # Latest values
+    # Results
     latest = df.iloc[-1]
     s_r = find_support_resistance(df)
 
@@ -120,11 +123,7 @@ def generate_signals(data):
 # API Endpoints
 # ---------------------------
 
-@app.route("/", methods=["GET"])
-def root():
-    return jsonify({"message": "TA Microservice is running!"})
-
-@app.route("/api/ta", methods=["GET"])
+@app.route("/ta", methods=["GET"])
 def ta_endpoint():
     ticker = request.args.get("ticker", "AAPL")
     interval = request.args.get("interval", "1h")
@@ -132,7 +131,7 @@ def ta_endpoint():
     data = calculate_indicators(ticker, interval, period)
     return jsonify(data)
 
-@app.route("/api/signals", methods=["GET"])
+@app.route("/signals", methods=["GET"])
 def signals_endpoint():
     ticker = request.args.get("ticker", "AAPL")
     interval = request.args.get("interval", "1h")
@@ -143,6 +142,10 @@ def signals_endpoint():
         "ticker": ticker.upper(),
         "signals": signals
     })
+
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"message": "TA Microservice is running!"})
 
 # ---------------------------
 # Run App
