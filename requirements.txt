@@ -1,0 +1,5 @@
+Flask
+pandas
+pandas-ta
+yfinance
+gunicorn
