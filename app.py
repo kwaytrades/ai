@@ -42,13 +42,22 @@ def find_support_resistance(df, num_levels=2):
     highs = df['High'].rolling(window=5, center=True).max()
     lows = df['Low'].rolling(window=5, center=True).min()
 
-    resistance_levels = sorted(highs.dropna().squeeze().unique())[-num_levels:]
-    support_levels = sorted(lows.dropna().squeeze().unique())[:num_levels]
+    # FIX: Convert numpy array from .unique() to a list before sorting
+    unique_highs = highs.dropna().unique().tolist()
+    unique_lows = lows.dropna().unique().tolist()
+
+    # Sort the lists
+    unique_highs.sort()
+    unique_lows.sort()
+
+    resistance_levels = unique_highs[-num_levels:]
+    support_levels = unique_lows[:num_levels]
 
     return {
-        "support_levels": [round(float(s), 2) for s in support_levels],
-        "resistance_levels": [round(float(r), 2) for r in resistance_levels]
+        "support_levels": [round(s, 2) for s in support_levels],
+        "resistance_levels": [round(r, 2) for r in resistance_levels]
     }
+
 
 def calculate_indicators(ticker, interval='1h', period='1mo'):
     """Calculate all technical indicators with proper validation."""
@@ -57,28 +66,31 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     if df.empty or not all(col in df.columns for col in ['Open', 'High', 'Low', 'Close', 'Volume']):
         return {"error": f"No valid OHLCV data found for {ticker} with interval {interval} and period {period}."}
 
+    # Convert columns to numeric
     for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
     df = df.dropna()
-    if len(df) < 50:
-        return {"error": f"Not enough data points for {ticker} to compute indicators."}
+    if df.empty:
+        return {"error": f"Data for {ticker} is empty after cleaning."}
 
     close_series = df['Close']
     high_series = df['High']
     low_series = df['Low']
 
-    try:
-        df['RSI'] = ta.rsi(close_series, length=14)
-        macd = ta.macd(close_series, fast=12, slow=26, signal=9)
-        df['EMA_20'] = ta.ema(close_series, length=20)
-        df['EMA_50'] = ta.ema(close_series, length=50)
-        df['EMA_200'] = ta.ema(close_series, length=200)
-        bbands = ta.bbands(close_series, length=20, std=2)
-        df['ATR'] = ta.atr(high_series, low_series, close_series, length=14)
-        df['VWAP'] = calculate_vwap(df)
-    except Exception as e:
-        return {"error": f"Indicator calculation failed: {str(e)}"}
+    # Validate close_series is non-empty and > 1 element
+    if close_series.empty or len(close_series) < 2:
+        return {"error": f"Not enough data points for {ticker} to compute indicators."}
+
+    # Indicators
+    df['RSI'] = ta.rsi(close_series, length=14)
+    macd = ta.macd(close_series, fast=12, slow=26, signal=9)
+    df['EMA_20'] = ta.ema(close_series, length=20)
+    df['EMA_50'] = ta.ema(close_series, length=50)
+    df['EMA_200'] = ta.ema(close_series, length=200)
+    bbands = ta.bbands(close_series, length=20, std=2)
+    df['ATR'] = ta.atr(high_series, low_series, close_series, length=14)
+    df['VWAP'] = calculate_vwap(df)
 
     latest = df.iloc[-1]
     s_r = find_support_resistance(df)
@@ -86,25 +98,25 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     return {
         "ticker": ticker.upper(),
         "interval": interval,
-        "last_price": round(float(latest['Close']), 2),
-        "rsi": round(float(latest['RSI']), 2),
+        "last_price": round(latest['Close'], 2),
+        "rsi": round(latest.get('RSI'), 2) if pd.notna(latest.get('RSI')) else None,
         "macd": {
-            "macd": round(float(macd.iloc[-1]['MACD_12_26_9']), 2),
-            "signal": round(float(macd.iloc[-1]['MACDs_12_26_9']), 2),
-            "hist": round(float(macd.iloc[-1]['MACDh_12_26_9']), 2),
+            "macd": round(macd.iloc[-1]['MACD_12_26_9'], 2) if pd.notna(macd.iloc[-1]['MACD_12_26_9']) else None,
+            "signal": round(macd.iloc[-1]['MACDs_12_26_9'], 2) if pd.notna(macd.iloc[-1]['MACDs_12_26_9']) else None,
+            "hist": round(macd.iloc[-1]['MACDh_12_26_9'], 2) if pd.notna(macd.iloc[-1]['MACDh_12_26_9']) else None,
         },
         "ema": {
-            "ema_20": round(float(latest['EMA_20']), 2),
-            "ema_50": round(float(latest['EMA_50']), 2),
-            "ema_200": round(float(latest['EMA_200']), 2)
+            "ema_20": round(latest.get('EMA_20'), 2) if pd.notna(latest.get('EMA_20')) else None,
+            "ema_50": round(latest.get('EMA_50'), 2) if pd.notna(latest.get('EMA_50')) else None,
+            "ema_200": round(latest.get('EMA_200'), 2) if pd.notna(latest.get('EMA_200')) else None
         },
         "bollinger": {
-            "upper": round(float(bbands.iloc[-1]['BBU_20_2.0']), 2),
-            "middle": round(float(bbands.iloc[-1]['BBM_20_2.0']), 2),
-            "lower": round(float(bbands.iloc[-1]['BBL_20_2.0']), 2)
+            "upper": round(bbands.iloc[-1]['BBU_20_2.0'], 2) if pd.notna(bbands.iloc[-1]['BBU_20_2.0']) else None,
+            "middle": round(bbands.iloc[-1]['BBM_20_2.0'], 2) if pd.notna(bbands.iloc[-1]['BBM_20_2.0']) else None,
+            "lower": round(bbands.iloc[-1]['BBL_20_2.0'], 2) if pd.notna(bbands.iloc[-1]['BBL_20_2.0']) else None
         },
-        "atr": round(float(latest['ATR']), 2),
-        "vwap": round(float(latest['VWAP']), 2),
+        "atr": round(latest.get('ATR'), 2) if pd.notna(latest.get('ATR')) else None,
+        "vwap": round(latest.get('VWAP'), 2) if pd.notna(latest.get('VWAP')) else None,
         "support": s_r["support_levels"],
         "resistance": s_r["resistance_levels"],
         "gaps": detect_gaps(df)
@@ -117,22 +129,26 @@ def generate_signals(data):
         
     signals = []
 
-    if data['rsi'] > 70:
-        signals.append(f"{data['ticker']} is overbought (RSI {data['rsi']})")
-    elif data['rsi'] < 30:
-        signals.append(f"{data['ticker']} is oversold (RSI {data['rsi']})")
+    if data.get('rsi') is not None:
+        if data['rsi'] > 70:
+            signals.append(f"{data['ticker']} is overbought (RSI {data['rsi']})")
+        elif data['rsi'] < 30:
+            signals.append(f"{data['ticker']} is oversold (RSI {data['rsi']})")
 
-    if data['last_price'] > data['vwap']:
-        signals.append("Price is above VWAP (bullish intraday trend).")
-    else:
-        signals.append("Price is below VWAP (bearish intraday trend).")
+    if data.get('last_price') is not None and data.get('vwap') is not None:
+        if data['last_price'] > data['vwap']:
+            signals.append("Price is above VWAP (bullish intraday trend).")
+        else:
+            signals.append("Price is below VWAP (bearish intraday trend).")
+    
+    if data.get('last_price') is not None and data.get('ema', {}).get('ema_50') is not None:
+        if data['last_price'] > data['ema']['ema_50']:
+            signals.append("Price is above EMA-50, bullish momentum.")
+        else:
+            signals.append("Price is below EMA-50, caution.")
 
-    if data['last_price'] > data['ema']['ema_50']:
-        signals.append("Price is above EMA-50, bullish momentum.")
-    else:
-        signals.append("Price is below EMA-50, caution.")
-
-    signals.append(f"Support near {data['support']}, resistance at {data['resistance']}.")
+    if data.get('support') and data.get('resistance'):
+        signals.append(f"Support near {data['support']}, resistance at {data['resistance']}.")
 
     return signals
 
@@ -176,22 +192,13 @@ def signals_endpoint():
 
 @app.route("/debug", methods=["GET"])
 def debug_endpoint():
+    """Debug endpoint to return last 5 rows of raw OHLCV data."""
     ticker = request.args.get("ticker", "AAPL")
     interval = request.args.get("interval", "1d")
     period = request.args.get("period", "1mo")
     df = fetch_ohlcv(ticker, interval, period)
-    return jsonify(df.tail(5).reset_index().to_dict(orient="records"))
+    return jsonify(df.tail(5).to_dict(orient="index"))
 
-@app.route("/health", methods=["GET"])
-def health_check():
-    try:
-        df = fetch_ohlcv("AAPL", "1d", "5d")
-        if df.empty:
-            return jsonify({"status": "error", "message": "Unable to fetch test data from yfinance."}), 500
-        last_price = round(float(df['Close'].iloc[-1]), 2)
-        return jsonify({"status": "ok", "message": "Service is healthy.", "last_price": last_price})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/", methods=["GET"])
 def root():
