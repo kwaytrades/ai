@@ -57,7 +57,6 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     
     df = df.dropna()
 
-    # If after dropping NA, the dataframe is empty, return error
     if df.empty:
         return {"error": f"Not enough data for {ticker} for the selected period/interval after cleaning."}
 
@@ -134,7 +133,6 @@ def generate_signals(data):
 @app.route("/ta", methods=["GET"])
 def ta_endpoint():
     ticker = request.args.get("ticker", "AAPL")
-    # FIX: Changed default interval to '1d' for better reliability on hosting services
     interval = request.args.get("interval", "1d")
     period = request.args.get("period", "1mo")
     
@@ -149,7 +147,6 @@ def ta_endpoint():
 @app.route("/signals", methods=["GET"])
 def signals_endpoint():
     ticker = request.args.get("ticker", "AAPL")
-    # FIX: Changed default interval to '1d' for better reliability on hosting services
     interval = request.args.get("interval", "1d")
     period = request.args.get("period", "1mo")
 
@@ -166,71 +163,6 @@ def signals_endpoint():
         })
     except Exception as e:
         return jsonify({"error": "An unexpected server error occurred.", "details": str(e)}), 500
-
-@app.route("/", methods=["GET"])
-def root():
-    return jsonify({"message": "TA Microservice is running!"})
-
-# ---------------------------
-# Run App
-# ---------------------------
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
-
-    if data['last_price'] > data['ema']['ema_50']:
-        signals.append("Price is above EMA-50, bullish momentum.")
-    else:
-        signals.append("Price is below EMA-50, caution.")
-
-    signals.append(f"Support near {data['support']}, resistance at {data['resistance']}.")
-
-    return signals
-
-# ---------------------------
-# API Endpoints
-# ---------------------------
-
-@app.route("/ta", methods=["GET"])
-def ta_endpoint():
-    ticker = request.args.get("ticker", "AAPL")
-    interval = request.args.get("interval", "1h")
-    period = request.args.get("period", "1mo")
-    
-    # --- START OF NEW CODE ---
-    # Use a try-except block to catch any unexpected errors
-    try:
-        data = calculate_indicators(ticker, interval, period)
-        if "error" in data:
-            # Return a 400 Bad Request if there was an issue with the ticker
-            return jsonify(data), 400
-        return jsonify(data)
-    except Exception as e:
-        # Return a 500 Internal Server Error for any other crash
-        return jsonify({"error": "An unexpected server error occurred.", "details": str(e)}), 500
-    # --- END OF NEW CODE ---
-
-@app.route("/signals", methods=["GET"])
-def signals_endpoint():
-    ticker = request.args.get("ticker", "AAPL")
-    interval = request.args.get("interval", "1h")
-    period = request.args.get("period", "1mo")
-
-    # --- START OF NEW CODE ---
-    try:
-        data = calculate_indicators(ticker, interval, period)
-        signals = generate_signals(data)
-        
-        # Check if the signals list contains an error message
-        if "error" in data:
-            return jsonify({"error": signals[0]}), 400
-
-        return jsonify({
-            "ticker": ticker.upper(),
-            "signals": signals
-        })
-    except Exception as e:
-        return jsonify({"error": "An unexpected server error occurred.", "details": str(e)}), 500
-    # --- END OF NEW CODE ---
 
 @app.route("/", methods=["GET"])
 def root():
