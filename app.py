@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify
 import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
-from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -12,8 +11,11 @@ app = Flask(__name__)
 
 def fetch_ohlcv(ticker, interval='1h', period='1mo'):
     """Fetch OHLCV data from Yahoo Finance."""
-    data = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
-    return data
+    try:
+        data = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
+        return data
+    except Exception as e:
+        return pd.DataFrame()
 
 def calculate_vwap(df):
     """Calculate VWAP."""
@@ -49,28 +51,29 @@ def find_support_resistance(df, num_levels=2):
     }
 
 def calculate_indicators(ticker, interval='1h', period='1mo'):
-    """Calculate all technical indicators."""
+    """Calculate all technical indicators with proper validation."""
     df = fetch_ohlcv(ticker, interval, period)
 
-    if df.empty or 'Close' not in df.columns:
-        return {"error": f"Could not retrieve data for ticker {ticker}. It may be invalid or have no data."}
+    if df.empty or not all(col in df.columns for col in ['Open', 'High', 'Low', 'Close', 'Volume']):
+        return {"error": f"No valid OHLCV data found for {ticker} with interval {interval} and period {period}."}
 
-    # Ensure all OHLCV columns are numeric
-    ohlcv_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-    for col in ohlcv_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Convert columns to numeric
+    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    df = df.dropna(subset=ohlcv_cols)
+    df = df.dropna()
     if df.empty:
-        return {"error": f"No valid OHLCV data found for {ticker} after cleaning."}
+        return {"error": f"Data for {ticker} is empty after cleaning."}
 
     close_series = df['Close']
     high_series = df['High']
     low_series = df['Low']
-    vol_series = df['Volume']
 
-    # Basic Indicators
+    # Validate close_series is non-empty and > 1 element
+    if close_series.empty or len(close_series) < 2:
+        return {"error": f"Not enough data points for {ticker} to compute indicators."}
+
+    # Indicators
     df['RSI'] = ta.rsi(close_series, length=14)
     macd = ta.macd(close_series, fast=12, slow=26, signal=9)
     df['EMA_20'] = ta.ema(close_series, length=20)
@@ -176,13 +179,12 @@ def signals_endpoint():
 
 @app.route("/debug", methods=["GET"])
 def debug_endpoint():
-    """Debug endpoint to return raw OHLCV data for testing."""
+    """Debug endpoint to return last 5 rows of raw OHLCV data."""
     ticker = request.args.get("ticker", "AAPL")
-    df = fetch_ohlcv(ticker)
-    return jsonify({
-        "columns": list(df.columns),
-        "sample_data": df.tail(5).to_dict()
-    })
+    interval = request.args.get("interval", "1d")
+    period = request.args.get("period", "1mo")
+    df = fetch_ohlcv(ticker, interval, period)
+    return jsonify(df.tail(5).to_dict(orient="index"))
 
 @app.route("/", methods=["GET"])
 def root():
@@ -193,4 +195,5 @@ def root():
 # ---------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
