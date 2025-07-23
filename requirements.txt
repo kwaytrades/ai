@@ -3,3 +3,4 @@ pandas
 pandas-ta
 yfinance
 gunicorn
+setuptools
