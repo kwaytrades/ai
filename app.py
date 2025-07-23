@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify
 import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
-from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -53,7 +52,7 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     """Calculate all technical indicators."""
     df = fetch_ohlcv(ticker, interval, period)
 
-    # Basic Indicators
+    # Technical Indicators
     df['RSI'] = ta.rsi(df['Close'], length=14)
     macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
     df['EMA_20'] = ta.ema(df['Close'], length=20)
@@ -63,7 +62,7 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
     df['VWAP'] = calculate_vwap(df)
 
-    # Results
+    # Latest values
     latest = df.iloc[-1]
     s_r = find_support_resistance(df)
 
@@ -121,7 +120,11 @@ def generate_signals(data):
 # API Endpoints
 # ---------------------------
 
-@app.route("/ta", methods=["GET"])
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"message": "TA Microservice is running!"})
+
+@app.route("/api/ta", methods=["GET"])
 def ta_endpoint():
     ticker = request.args.get("ticker", "AAPL")
     interval = request.args.get("interval", "1h")
@@ -129,7 +132,7 @@ def ta_endpoint():
     data = calculate_indicators(ticker, interval, period)
     return jsonify(data)
 
-@app.route("/signals", methods=["GET"])
+@app.route("/api/signals", methods=["GET"])
 def signals_endpoint():
     ticker = request.args.get("ticker", "AAPL")
     interval = request.args.get("interval", "1h")
@@ -141,28 +144,9 @@ def signals_endpoint():
         "signals": signals
     })
 
-@app.route("/", methods=["GET"])
-def root():
-    return jsonify({"message": "TA Microservice is running!"})
-
 # ---------------------------
 # Run App
 # ---------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
-@app.route("/")
-def home():
-    return "Flask API is running! Use /api/ta?ticker=XYZ"
-
-@app.route("/api/ta", methods=["GET"])
-def technical_analysis():
-    ticker = request.args.get("ticker", "AAPL")
-    df = fetch_ohlcv(ticker)
-    vwap = calculate_vwap(df).iloc[-1]
-    return jsonify({
-        "ticker": ticker,
-        "vwap": round(float(vwap), 2),
-        "latest_close": round(float(df['Close'].iloc[-1]), 2)
-    })
 
