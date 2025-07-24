@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 import traceback
 import logging
+import numpy as np
 import re
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -140,6 +141,19 @@ def validate_ohlcv_data(df: pd.DataFrame) -> Tuple[bool, str]:
     if missing_cols:
         return False, f"Missing required columns: {missing_cols}"
     
+    # Check for basic data integrity
+    invalid_high_low = (df['High'] < df['Low']).any()
+    if invalid_high_low:
+        return False, "Invalid data: High < Low detected"
+        
+    invalid_close = ((df['Close'] > df['High']) | (df['Close'] < df['Low'])).any()
+    if invalid_close:
+        return False, "Invalid data: Close outside High/Low range"
+        
+    negative_prices = (df[['Open', 'High', 'Low', 'Close']] < 0).any().any()
+    if negative_prices:
+        return False, "Invalid data: Negative prices detected"
+    
     # Check for sufficient data points
     if len(df) < 5:  # Lowered minimum for testing
         return False, f"Insufficient data points. Got {len(df)}, minimum required: 5"
@@ -219,8 +233,78 @@ def fetch_ohlcv(ticker: str, interval: str = '1d', period: str = '1mo') -> pd.Da
         return pd.DataFrame()
 
 # ---------------------------
-# Technical Analysis Functions
+# Technical Analysis Functions (Pure Pandas Implementation)
 # ---------------------------
+
+def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
+    """Calculate RSI using pure pandas."""
+    try:
+        delta = prices.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    except Exception as e:
+        logger.error(f"Error calculating RSI: {str(e)}")
+        return pd.Series(index=prices.index, dtype=float)
+
+def calculate_ema(prices: pd.Series, period: int) -> pd.Series:
+    """Calculate EMA using pure pandas."""
+    try:
+        return prices.ewm(span=period, adjust=False).mean()
+    except Exception as e:
+        logger.error(f"Error calculating EMA: {str(e)}")
+        return pd.Series(index=prices.index, dtype=float)
+
+def calculate_macd(prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Optional[pd.DataFrame]:
+    """Calculate MACD using pure pandas."""
+    try:
+        ema_fast = calculate_ema(prices, fast)
+        ema_slow = calculate_ema(prices, slow)
+        macd_line = ema_fast - ema_slow
+        signal_line = calculate_ema(macd_line, signal)
+        histogram = macd_line - signal_line
+        
+        return pd.DataFrame({
+            'MACD_12_26_9': macd_line,
+            'MACDs_12_26_9': signal_line,
+            'MACDh_12_26_9': histogram
+        })
+    except Exception as e:
+        logger.error(f"Error calculating MACD: {str(e)}")
+        return None
+
+def calculate_bollinger_bands(prices: pd.Series, period: int = 20, std_dev: float = 2.0) -> Optional[pd.DataFrame]:
+    """Calculate Bollinger Bands using pure pandas."""
+    try:
+        rolling_mean = prices.rolling(window=period).mean()
+        rolling_std = prices.rolling(window=period).std()
+        
+        upper_band = rolling_mean + (rolling_std * std_dev)
+        lower_band = rolling_mean - (rolling_std * std_dev)
+        
+        return pd.DataFrame({
+            'BBU_20_2.0': upper_band,
+            'BBM_20_2.0': rolling_mean,
+            'BBL_20_2.0': lower_band
+        })
+    except Exception as e:
+        logger.error(f"Error calculating Bollinger Bands: {str(e)}")
+        return None
+
+def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """Calculate ATR using pure pandas."""
+    try:
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
+        true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = true_range.rolling(window=period).mean()
+        return atr
+    except Exception as e:
+        logger.error(f"Error calculating ATR: {str(e)}")
+        return pd.Series(index=high.index, dtype=float)
 
 def calculate_daily_vwap(df: pd.DataFrame) -> pd.Series:
     """Calculate Volume Weighted Average Price that resets daily."""
@@ -228,19 +312,19 @@ def calculate_daily_vwap(df: pd.DataFrame) -> pd.Series:
         if df.empty or 'Volume' not in df.columns or df['Volume'].sum() == 0:
             return pd.Series(index=df.index, dtype=float)
         
-        # Simple VWAP calculation (not daily reset for simplicity)
+        # Simple VWAP calculation (cumulative for simplicity)
         volume_sum = df['Volume'].cumsum()
         price_volume_sum = (df['Close'] * df['Volume']).cumsum()
         vwap = price_volume_sum / volume_sum
         
-        return vwap.fillna(method='ffill')
+        return vwap.ffill()
         
     except Exception as e:
         logger.error(f"Error calculating VWAP: {str(e)}")
         return pd.Series(index=df.index, dtype=float)
 
 def find_pivot_levels(df: pd.DataFrame, window: int = None, num_levels: int = None) -> Dict[str, List[float]]:
-    """Find support and resistance levels using simple high/low analysis."""
+    """Find support and resistance levels using pivot point analysis."""
     if window is None:
         window = min(config.PIVOT_WINDOW, len(df) // 4)
     if num_levels is None:
@@ -250,17 +334,49 @@ def find_pivot_levels(df: pd.DataFrame, window: int = None, num_levels: int = No
         return {"support_levels": [], "resistance_levels": []}
     
     try:
-        # Simplified approach: use rolling max/min
-        rolling_high = df['High'].rolling(window=window, center=True).max()
-        rolling_low = df['Low'].rolling(window=window, center=True).min()
+        # Find pivot highs (resistance levels)
+        pivot_high_conditions = []
+        for i in range(1, window + 1):
+            pivot_high_conditions.append(df['High'].shift(i) < df['High'])
+            pivot_high_conditions.append(df['High'].shift(-i) < df['High'])
         
-        # Find where actual values equal rolling max/min (pivot points)
-        pivot_highs = df.loc[df['High'] == rolling_high, 'High'].dropna()
-        pivot_lows = df.loc[df['Low'] == rolling_low, 'Low'].dropna()
+        if pivot_high_conditions:
+            pivot_high_mask = pd.concat(pivot_high_conditions, axis=1).all(axis=1)
+            pivot_highs = df.loc[pivot_high_mask, 'High'].dropna()
+        else:
+            pivot_highs = pd.Series(dtype=float)
         
-        # Get most recent significant levels
-        resistance_levels = sorted(pivot_highs.tail(num_levels * 2).unique(), reverse=True)[:num_levels]
-        support_levels = sorted(pivot_lows.tail(num_levels * 2).unique())[:num_levels]
+        # Find pivot lows (support levels)
+        pivot_low_conditions = []
+        for i in range(1, window + 1):
+            pivot_low_conditions.append(df['Low'].shift(i) > df['Low'])
+            pivot_low_conditions.append(df['Low'].shift(-i) > df['Low'])
+        
+        if pivot_low_conditions:
+            pivot_low_mask = pd.concat(pivot_low_conditions, axis=1).all(axis=1)
+            pivot_lows = df.loc[pivot_low_mask, 'Low'].dropna()
+        else:
+            pivot_lows = pd.Series(dtype=float)
+        
+        # Get most significant levels (closest to current price for relevance)
+        current_price = df['Close'].iloc[-1]
+        
+        # Sort resistance levels by proximity to current price
+        if not pivot_highs.empty:
+            resistance_levels = sorted(
+                pivot_highs[pivot_highs > current_price].nsmallest(num_levels),
+                reverse=True
+            )
+        else:
+            resistance_levels = []
+        
+        # Sort support levels by proximity to current price  
+        if not pivot_lows.empty:
+            support_levels = sorted(
+                pivot_lows[pivot_lows < current_price].nlargest(num_levels)
+            )
+        else:
+            support_levels = []
         
         return {
             "support_levels": [round(float(s), 2) for s in support_levels],
@@ -304,11 +420,17 @@ def detect_price_gaps(df: pd.DataFrame, threshold_percent: float = None) -> List
                     "open": round(row['Open'], 2),
                     "gap_size": round(abs(row['Open'] - prev_close.loc[index]), 2)
                 }
+                
+                if hasattr(index, 'time'):
+                    gap_info["time"] = str(index.time())
+                    
                 gaps.append(gap_info)
             except Exception as gap_error:
                 logger.warning(f"Error processing gap at {index}: {str(gap_error)}")
                 continue
         
+        # Sort by date (most recent first)
+        gaps.sort(key=lambda x: x['datetime'], reverse=True)
         return gaps
         
     except Exception as e:
@@ -352,7 +474,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         # RSI
         if len(df) >= config.RSI_PERIOD:
             try:
-                rsi_series = ta.rsi(df['Close'], length=config.RSI_PERIOD)
+                rsi_series = calculate_rsi(df['Close'], config.RSI_PERIOD)
                 if rsi_series is not None and not rsi_series.empty:
                     rsi_value = rsi_series.iloc[-1]
                     if pd.notna(rsi_value):
@@ -366,33 +488,22 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         # MACD
         if len(df) >= config.MACD_SLOW:
             try:
-                macd_data = ta.macd(
-                    df['Close'], 
-                    fast=config.MACD_FAST, 
-                    slow=config.MACD_SLOW, 
-                    signal=config.MACD_SIGNAL
-                )
+                macd_data = calculate_macd(df['Close'], config.MACD_FAST, config.MACD_SLOW, config.MACD_SIGNAL)
                 
                 if macd_data is not None and not macd_data.empty:
                     latest_macd = macd_data.iloc[-1]
                     
-                    # Get MACD values safely
-                    macd_cols = [col for col in macd_data.columns if 'MACD' in col and 'h' not in col and 's' not in col]
-                    signal_cols = [col for col in macd_data.columns if 'MACDs' in col]
-                    hist_cols = [col for col in macd_data.columns if 'MACDh' in col]
+                    macd_val = latest_macd['MACD_12_26_9']
+                    signal_val = latest_macd['MACDs_12_26_9']
+                    hist_val = latest_macd['MACDh_12_26_9']
                     
-                    if macd_cols and signal_cols and hist_cols:
-                        macd_val = latest_macd[macd_cols[0]]
-                        signal_val = latest_macd[signal_cols[0]]
-                        hist_val = latest_macd[hist_cols[0]]
-                        
-                        if all(pd.notna([macd_val, signal_val, hist_val])):
-                            indicators['macd'] = {
-                                'macd': round(float(macd_val), 4),
-                                'signal': round(float(signal_val), 4),
-                                'histogram': round(float(hist_val), 4),
-                                'trend': 'bullish' if macd_val > signal_val else 'bearish'
-                            }
+                    if all(pd.notna([macd_val, signal_val, hist_val])):
+                        indicators['macd'] = {
+                            'macd': round(float(macd_val), 4),
+                            'signal': round(float(signal_val), 4),
+                            'histogram': round(float(hist_val), 4),
+                            'trend': 'bullish' if macd_val > signal_val else 'bearish'
+                        }
             except Exception as e:
                 logger.error(f"Error calculating MACD: {str(e)}")
         
@@ -401,7 +512,7 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         for period in config.EMA_PERIODS:
             if len(df) >= period:
                 try:
-                    ema_series = ta.ema(df['Close'], length=period)
+                    ema_series = calculate_ema(df['Close'], period)
                     if ema_series is not None and not ema_series.empty:
                         ema_value = ema_series.iloc[-1]
                         if pd.notna(ema_value):
@@ -412,10 +523,36 @@ def calculate_technical_indicators(df: pd.DataFrame) -> Dict[str, Any]:
         if ema_data:
             indicators['ema'] = ema_data
         
+        # Bollinger Bands
+        if len(df) >= config.BBANDS_PERIOD:
+            try:
+                bbands = calculate_bollinger_bands(df['Close'], config.BBANDS_PERIOD, config.BBANDS_STD)
+                
+                if bbands is not None and not bbands.empty:
+                    latest_bb = bbands.iloc[-1]
+                    
+                    upper = latest_bb['BBU_20_2.0']
+                    middle = latest_bb['BBM_20_2.0']
+                    lower = latest_bb['BBL_20_2.0']
+                    
+                    if all(pd.notna([upper, middle, lower])):
+                        current_price = df['Close'].iloc[-1]
+                        bb_position = ((current_price - lower) / (upper - lower)) * 100
+                        
+                        indicators['bollinger_bands'] = {
+                            'upper': round(float(upper), 2),
+                            'middle': round(float(middle), 2),
+                            'lower': round(float(lower), 2),
+                            'bb_position': round(bb_position, 2),
+                            'signal': 'overbought' if bb_position > 80 else 'oversold' if bb_position < 20 else 'neutral'
+                        }
+            except Exception as e:
+                logger.error(f"Error calculating Bollinger Bands: {str(e)}")
+        
         # ATR
         if len(df) >= config.ATR_PERIOD:
             try:
-                atr_series = ta.atr(df['High'], df['Low'], df['Close'], length=config.ATR_PERIOD)
+                atr_series = calculate_atr(df['High'], df['Low'], df['Close'], config.ATR_PERIOD)
                 if atr_series is not None and not atr_series.empty:
                     atr_value = atr_series.iloc[-1]
                     if pd.notna(atr_value):
@@ -554,6 +691,46 @@ def generate_trading_signals(data: Dict[str, Any], indicators: Dict[str, Any]) -
                 })
                 break
         
+        # Bollinger Bands Signals
+        bb_data = indicators.get('bollinger_bands')
+        if bb_data:
+            bb_pos = bb_data['bb_position']
+            if bb_pos > 80:
+                signals.append({
+                    "type": "warning",
+                    "indicator": "Bollinger Bands",
+                    "message": f"Price in upper band ({bb_pos:.1f}%). Potential reversal zone.",
+                    "strength": "moderate"
+                })
+            elif bb_pos < 20:
+                signals.append({
+                    "type": "opportunity",
+                    "indicator": "Bollinger Bands", 
+                    "message": f"Price in lower band ({bb_pos:.1f}%). Potential bounce zone.",
+                    "strength": "moderate"
+                })
+        
+        # Gap Analysis
+        gaps = data.get('gaps', [])
+        recent_gaps = [g for g in gaps if 
+                      (datetime.now() - datetime.fromisoformat(g['datetime'].replace('Z', '+00:00'))).days <= 5]
+        
+        for gap in recent_gaps[:2]:  # Only recent gaps
+            if gap['type'] == 'gap_up' and gap['gap_percent'] > 3:
+                signals.append({
+                    "type": "info",
+                    "indicator": "Gap Analysis",
+                    "message": f"Recent gap up ({gap['gap_percent']:.1f}%). Watch for gap fill.",
+                    "strength": "weak"
+                })
+            elif gap['type'] == 'gap_down' and gap['gap_percent'] < -3:
+                signals.append({
+                    "type": "info", 
+                    "indicator": "Gap Analysis",
+                    "message": f"Recent gap down ({gap['gap_percent']:.1f}%). Watch for gap fill.",
+                    "strength": "weak"
+                })
+        
         if not signals:
             signals.append({
                 "type": "neutral",
@@ -660,7 +837,7 @@ def root():
     return jsonify({
         "service": "Technical Analysis Microservice",
         "status": "healthy",
-        "version": "2.0.1",
+        "version": "2.1.0-pure-pandas",
         "timestamp": datetime.now().isoformat(),
         "cache_size": len(data_cache.cache),
         "endpoints": {
@@ -686,7 +863,9 @@ def health_check():
             "min_data_points": 5,
             "gap_threshold": config.GAP_THRESHOLD_PERCENT,
             "pivot_window": config.PIVOT_WINDOW
-        }
+        },
+        "implementation": "Pure pandas technical analysis",
+        "features": ["RSI", "MACD", "EMA", "Bollinger Bands", "VWAP", "ATR", "Support/Resistance", "Gap Analysis"]
     })
 
 @app.route("/analysis", methods=["GET"])
@@ -785,5 +964,5 @@ def internal_error(error):
 if __name__ == "__main__":
     import os
     port = int(os.environ.get("PORT", 5000))
-    logger.info("Starting Technical Analysis Microservice v2.0.1")
+    logger.info("Starting Pure Pandas Technical Analysis Microservice v2.1.0")
     app.run(host="0.0.0.0", port=port, debug=False)
