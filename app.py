@@ -13,6 +13,9 @@ import requests
 import os
 from typing import Dict, List, Optional, Tuple, Any
 
+# Import Redis cache manager
+from cache_manager import get_cached_analysis, cache_analysis, cache_manager, invalidate_ticker_cache
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
