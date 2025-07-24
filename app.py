@@ -59,61 +59,102 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     if df.empty or not all(col in df.columns for col in ['Open', 'High', 'Low', 'Close', 'Volume']):
         return {"error": f"No valid OHLCV data found for {ticker} with interval {interval} and period {period}."}
 
-    # Convert columns to numeric
+    # Convert columns to numeric and clean data
     for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-
     df = df.dropna()
+    
     if df.empty:
         return {"error": f"Data for {ticker} is empty after cleaning."}
+
+    # --- START OF FIX ---
+    # Define required lengths for indicators
+    rsi_len = 14
+    macd_slow = 26
+    ema_20_len = 20
+    ema_50_len = 50
+    ema_200_len = 200
+    bbands_len = 20
+    atr_len = 14
+    
+    # Check for minimum data length
+    min_len = 2 # A bare minimum to do anything
+    if len(df) < min_len:
+        return {"error": f"Not enough data points for {ticker} to compute indicators. Required: {min_len}, Got: {len(df)}."}
 
     close_series = df['Close']
     high_series = df['High']
     low_series = df['Low']
 
-    # Validate close_series is non-empty and > 1 element
-    if close_series.empty or len(close_series) < 2:
-        return {"error": f"Not enough data points for {ticker} to compute indicators."}
+    # Conditionally calculate indicators
+    if len(df) >= rsi_len:
+        df['RSI'] = ta.rsi(close_series, length=rsi_len)
+        
+    if len(df) >= macd_slow:
+        macd = ta.macd(close_series, fast=12, slow=26, signal=9)
+    else:
+        macd = None # Set to None if not enough data
 
-    # Indicators
-    df['RSI'] = ta.rsi(close_series, length=14)
-    macd = ta.macd(close_series, fast=12, slow=26, signal=9)
-    df['EMA_20'] = ta.ema(close_series, length=20)
-    df['EMA_50'] = ta.ema(close_series, length=50)
-    df['EMA_200'] = ta.ema(close_series, length=200)
-    bbands = ta.bbands(close_series, length=20, std=2)
-    df['ATR'] = ta.atr(high_series, low_series, close_series, length=14)
+    if len(df) >= ema_20_len:
+        df['EMA_20'] = ta.ema(close_series, length=ema_20_len)
+
+    if len(df) >= ema_50_len:
+        df['EMA_50'] = ta.ema(close_series, length=ema_50_len)
+
+    if len(df) >= ema_200_len:
+        df['EMA_200'] = ta.ema(close_series, length=ema_200_len)
+
+    if len(df) >= bbands_len:
+        bbands = ta.bbands(close_series, length=bbands_len, std=2)
+    else:
+        bbands = None # Set to None if not enough data
+        
+    if len(df) >= atr_len:
+        df['ATR'] = ta.atr(high_series, low_series, close_series, length=atr_len)
+        
     df['VWAP'] = calculate_vwap(df)
+    s_r = find_support_resistance(df)
+    # --- END OF FIX ---
 
     latest = df.iloc[-1]
-    s_r = find_support_resistance(df)
-
-    return {
+    
+    # Build the response dictionary safely
+    response = {
         "ticker": ticker.upper(),
         "interval": interval,
         "last_price": round(latest['Close'], 2),
         "rsi": round(latest.get('RSI'), 2) if pd.notna(latest.get('RSI')) else None,
-        "macd": {
-            "macd": round(macd.iloc[-1]['MACD_12_26_9'], 2) if pd.notna(macd.iloc[-1]['MACD_12_26_9']) else None,
-            "signal": round(macd.iloc[-1]['MACDs_12_26_9'], 2) if pd.notna(macd.iloc[-1]['MACDs_12_26_9']) else None,
-            "hist": round(macd.iloc[-1]['MACDh_12_26_9'], 2) if pd.notna(macd.iloc[-1]['MACDh_12_26_9']) else None,
-        },
         "ema": {
             "ema_20": round(latest.get('EMA_20'), 2) if pd.notna(latest.get('EMA_20')) else None,
             "ema_50": round(latest.get('EMA_50'), 2) if pd.notna(latest.get('EMA_50')) else None,
             "ema_200": round(latest.get('EMA_200'), 2) if pd.notna(latest.get('EMA_200')) else None
         },
-        "bollinger": {
-            "upper": round(bbands.iloc[-1]['BBU_20_2.0'], 2) if pd.notna(bbands.iloc[-1]['BBU_20_2.0']) else None,
-            "middle": round(bbands.iloc[-1]['BBM_20_2.0'], 2) if pd.notna(bbands.iloc[-1]['BBM_20_2.0']) else None,
-            "lower": round(bbands.iloc[-1]['BBL_20_2.0'], 2) if pd.notna(bbands.iloc[-1]['BBL_20_2.0']) else None
-        },
         "atr": round(latest.get('ATR'), 2) if pd.notna(latest.get('ATR')) else None,
         "vwap": round(latest.get('VWAP'), 2) if pd.notna(latest.get('VWAP')) else None,
         "support": s_r["support_levels"],
         "resistance": s_r["resistance_levels"],
-        "gaps": detect_gaps(df)
+        "gaps": detect_gaps(df),
+        "macd": None, # Default to None
+        "bollinger": None # Default to None
     }
+    
+    # Safely add MACD if it was calculated
+    if macd is not None and not macd.empty:
+        response["macd"] = {
+            "macd": round(macd.iloc[-1]['MACD_12_26_9'], 2) if pd.notna(macd.iloc[-1]['MACD_12_26_9']) else None,
+            "signal": round(macd.iloc[-1]['MACDs_12_26_9'], 2) if pd.notna(macd.iloc[-1]['MACDs_12_26_9']) else None,
+            "hist": round(macd.iloc[-1]['MACDh_12_26_9'], 2) if pd.notna(macd.iloc[-1]['MACDh_12_26_9']) else None,
+        }
+        
+    # Safely add Bollinger Bands if calculated
+    if bbands is not None and not bbands.empty:
+        response["bollinger"] = {
+            "upper": round(bbands.iloc[-1]['BBU_20_2.0'], 2) if pd.notna(bbands.iloc[-1]['BBU_20_2.0']) else None,
+            "middle": round(bbands.iloc[-1]['BBM_20_2.0'], 2) if pd.notna(bbands.iloc[-1]['BBM_20_2.0']) else None,
+            "lower": round(bbands.iloc[-1]['BBL_20_2.0'], 2) if pd.notna(bbands.iloc[-1]['BBL_20_2.0']) else None
+        }
+
+    return response
 
 def generate_signals(data):
     """Generate human-readable trade signals."""
