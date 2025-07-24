@@ -4,3 +4,4 @@ pandas-ta==0.3.14b0
 yfinance==0.2.38
 gunicorn==23.0.0
 numpy==2.0.2
+setuptools==75.1.0
