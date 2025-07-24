@@ -6,9 +6,6 @@ import logging
 import numpy as np
 import re
 from datetime import datetime, timedelta
-from functools import lru_cache
-import hashlib
-import time
 import requests
 import os
 from typing import Dict, List, Optional, Tuple, Any
@@ -27,8 +24,6 @@ app = Flask(__name__)
 
 # Configuration
 class Config:
-    CACHE_TTL_SECONDS = 300  # 5 minutes cache
-    MAX_CACHE_SIZE = 128
     DEFAULT_INTERVAL = '1d'
     DEFAULT_PERIOD = '1mo'
     MIN_DATA_POINTS = 20
@@ -118,65 +113,7 @@ class EODHDClient:
 eodhd = EODHDClient()
 
 # ---------------------------
-# Cache Implementation (Complete)
-# ---------------------------
-
-class DataCache:
-    def __init__(self, ttl_seconds: int = 300, max_size: int = 128):
-        self.ttl_seconds = ttl_seconds
-        self.max_size = max_size
-        self.cache = {}
-        self.timestamps = {}
-        self.hit_count = 0
-        self.miss_count = 0
-    
-    def _generate_key(self, ticker: str, interval: str, period: str) -> str:
-        """Generate cache key from parameters."""
-        key_string = f"{ticker.upper()}_{interval}_{period}"
-        return hashlib.md5(key_string.encode()).hexdigest()
-    
-    def get(self, ticker: str, interval: str, period: str) -> Optional[Tuple[pd.DataFrame, str]]:
-        """Get cached data if valid."""
-        key = self._generate_key(ticker, interval, period)
-        
-        if key not in self.cache:
-            self.miss_count += 1
-            return None
-            
-        if time.time() - self.timestamps[key] > self.ttl_seconds:
-            del self.cache[key]
-            del self.timestamps[key]
-            self.miss_count += 1
-            return None
-            
-        self.hit_count += 1
-        logger.info(f"Cache hit for {ticker}")
-        data, source = self.cache[key]
-        return data.copy(), source
-    
-    def set(self, ticker: str, interval: str, period: str, data: pd.DataFrame, source: str):
-        """Cache data with TTL."""
-        key = self._generate_key(ticker, interval, period)
-        
-        if len(self.cache) >= self.max_size:
-            oldest_key = min(self.timestamps.keys(), key=lambda k: self.timestamps[k])
-            del self.cache[oldest_key]
-            del self.timestamps[oldest_key]
-        
-        self.cache[key] = (data.copy(), source)
-        self.timestamps[key] = time.time()
-        logger.info(f"Cached data for {ticker} (source: {source})")
-    
-    def clear(self):
-        """Clear all cache data."""
-        self.cache.clear()
-        self.timestamps.clear()
-
-# Global cache instance
-data_cache = DataCache(config.CACHE_TTL_SECONDS, config.MAX_CACHE_SIZE)
-
-# ---------------------------
-# Validation Functions (Complete)
+# Validation Functions
 # ---------------------------
 
 def validate_ticker(ticker: str) -> Tuple[bool, str]:
@@ -240,82 +177,22 @@ def validate_ohlcv_data(df: pd.DataFrame) -> Tuple[bool, str]:
     return True, "Data validation passed"
 
 # ---------------------------
-# Sample Data Generation (Fallback)
-# ---------------------------
-
-def generate_realistic_sample_data(ticker: str, period: str = '1mo') -> pd.DataFrame:
-    """Generate realistic sample data when real data fails."""
-    stock_profiles = {
-        'AAPL': {'base_price': 191.0, 'volatility': 0.018, 'volume_base': 80000000},
-        'MSFT': {'base_price': 428.0, 'volatility': 0.016, 'volume_base': 60000000},
-        'GOOGL': {'base_price': 170.0, 'volatility': 0.020, 'volume_base': 45000000},
-        'TSLA': {'base_price': 248.0, 'volatility': 0.035, 'volume_base': 120000000},
-        'NVDA': {'base_price': 135.0, 'volatility': 0.028, 'volume_base': 90000000}
-    }
-    
-    profile = stock_profiles.get(ticker.upper(), {
-        'base_price': 100.0, 'volatility': 0.020, 'volume_base': 50000000
-    })
-    
-    period_map = {'1d': 1, '5d': 5, '1mo': 21, '3mo': 63, '6mo': 126, '1y': 252}
-    periods = period_map.get(period, 21)
-    
-    end_date = datetime.now().replace(hour=16, minute=0, second=0, microsecond=0)
-    start_date = end_date - timedelta(days=periods)
-    dates = pd.bdate_range(start=start_date, end=end_date, freq='D')[:periods]
-    
-    np.random.seed(42 + hash(ticker) % 1000)
-    
-    base_price = profile['base_price']
-    volatility = profile['volatility']
-    
-    returns = np.random.normal(0.0005, volatility, periods)
-    prices = [base_price]
-    for ret in returns[1:]:
-        new_price = prices[-1] * (1 + ret)
-        prices.append(max(new_price, 0.01))
-    
-    data = []
-    for i, (date, close_price) in enumerate(zip(dates, prices)):
-        intraday_vol = close_price * volatility * 0.7
-        open_price = close_price + np.random.normal(0, intraday_vol * 0.3)
-        
-        high_addon = abs(np.random.exponential(intraday_vol * 0.5))
-        low_subtract = abs(np.random.exponential(intraday_vol * 0.5))
-        
-        high = max(open_price, close_price) + high_addon
-        low = min(open_price, close_price) - low_subtract
-        
-        high = max(high, open_price, close_price)
-        low = min(low, open_price, close_price)
-        open_price = max(min(open_price, high), low)
-        
-        base_volume = profile['volume_base']
-        volume = int(base_volume * np.random.uniform(0.7, 1.3))
-        
-        data.append({
-            'Open': round(open_price, 2),
-            'High': round(high, 2),
-            'Low': round(low, 2),
-            'Close': round(close_price, 2),
-            'Volume': volume
-        })
-    
-    df = pd.DataFrame(data, index=dates)
-    return df
-
-# ---------------------------
-# Main Data Fetching Function
+# Data Fetching with Redis Cache
 # ---------------------------
 
 def fetch_ohlcv_robust(ticker: str, interval: str = '1d', period: str = '1mo') -> Tuple[pd.DataFrame, str]:
-    """Production data fetching with EODHD - NO FALLBACK TO SAMPLE DATA."""
+    """Production data fetching with Redis caching - NO FALLBACK TO SAMPLE DATA."""
     
-    # Check cache first
-    cached_result = data_cache.get(ticker, interval, period)
+    # Check Redis cache first
+    cached_result = get_cached_analysis(ticker, interval, period)
     if cached_result is not None:
-        data, source = cached_result
-        return data, source
+        logger.info(f"Redis cache HIT for {ticker}")
+        # Reconstruct DataFrame from cached data
+        if 'ohlcv_data' in cached_result:
+            df_data = cached_result['ohlcv_data']
+            df = pd.DataFrame.from_dict({pd.to_datetime(k): v for k, v in df_data.items()}, orient='index')
+            df.sort_index(inplace=True)
+            return df, cached_result.get('data_source', 'cached')
     
     try:
         # Method 1: Try EODHD (real market data ONLY)
@@ -327,7 +204,14 @@ def fetch_ohlcv_robust(ticker: str, interval: str = '1d', period: str = '1mo') -
             
             data_valid, validation_msg = validate_ohlcv_data(eodhd_data)
             if data_valid:
-                data_cache.set(ticker, interval, period, eodhd_data, "eodhd")
+                # Cache raw OHLCV data for later use
+                cache_ohlcv_data = {
+                    'ohlcv_data': {k.isoformat(): v for k, v in eodhd_data.to_dict('index').items()},
+                    'data_source': 'eodhd',
+                    'cached_at': datetime.now().isoformat()
+                }
+                cache_analysis(ticker, interval, period, cache_ohlcv_data)
+                
                 return eodhd_data, "eodhd"
             else:
                 logger.error(f"EODHD data validation failed for {ticker}: {validation_msg}")
@@ -342,7 +226,7 @@ def fetch_ohlcv_robust(ticker: str, interval: str = '1d', period: str = '1mo') -
         return pd.DataFrame(), "error"
 
 # ---------------------------
-# Complete Technical Analysis Functions
+# Technical Analysis Functions
 # ---------------------------
 
 def calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
@@ -749,7 +633,7 @@ def generate_trading_signals(data: Dict[str, Any], indicators: Dict[str, Any]) -
                     "strength": "moderate"
                 })
         
-        # Support/Resistance Signals - THIS IS THE KEY PART YOU ASKED ABOUT
+        # Support/Resistance Signals
         support_levels = data.get('support_levels', [])
         resistance_levels = data.get('resistance_levels', [])
         
@@ -833,7 +717,7 @@ def generate_trading_signals(data: Dict[str, Any], indicators: Dict[str, Any]) -
     return signals
 
 def analyze_ticker(ticker: str, interval: str = '1d', period: str = '1mo') -> Dict[str, Any]:
-    """Complete technical analysis for a ticker with EODHD integration - REAL DATA ONLY."""
+    """Complete technical analysis with Redis caching - REAL DATA ONLY."""
     
     # Validate inputs
     ticker_valid, ticker_result = validate_ticker(ticker)
@@ -849,7 +733,7 @@ def analyze_ticker(ticker: str, interval: str = '1d', period: str = '1mo') -> Di
     if not period_valid:
         return {"error": period_result}
     
-    # Fetch data - REAL DATA ONLY
+    # Fetch data with Redis caching
     df, source = fetch_ohlcv_robust(ticker, interval, period)
     
     # Handle data fetch failures
@@ -869,7 +753,7 @@ def analyze_ticker(ticker: str, interval: str = '1d', period: str = '1mo') -> Di
         }
     
     # Only proceed if we have REAL data
-    if source != "eodhd":
+    if source not in ["eodhd", "cached"]:
         return {
             "error": f"Only real market data is accepted. Source '{source}' is not permitted.",
             "ticker": ticker
@@ -902,7 +786,8 @@ def analyze_ticker(ticker: str, interval: str = '1d', period: str = '1mo') -> Di
             "ticker": ticker,
             "interval": interval,
             "period": period,
-            "data_source": source,  # Will always be "eodhd" for real data
+            "data_source": "eodhd" if source == "cached" else source,  # Show original source
+            "cache_status": "hit" if source == "cached" else "miss",
             "last_updated": datetime.now().isoformat(),
             "data_points": len(df),
             "last_price": round(float(latest['Close']), 2),
@@ -941,38 +826,41 @@ def analyze_ticker(ticker: str, interval: str = '1d', period: str = '1mo') -> Di
         }
 
 # ---------------------------
-# API Endpoints
+# API Endpoints (Updated with Redis Cache Management)
 # ---------------------------
 
 @app.route("/", methods=["GET"])
 def root():
     """Health check endpoint."""
     return jsonify({
-        "service": "Technical Analysis Microservice - Production (Real Data Only)",
+        "service": "Technical Analysis Microservice - Production (Redis Cache)",
         "status": "healthy",
-        "version": "2.3.0-eodhd-production",
+        "version": "2.4.0-redis-cache",
         "timestamp": datetime.now().isoformat(),
         "data_policy": "REAL MARKET DATA ONLY - No sample/demo data",
         "data_source": "EODHD Professional Market Data",
+        "caching": "Redis with market-aware TTL",
         "features": [
             "RSI", "MACD", "EMA", "Bollinger Bands", "VWAP", "ATR",
             "Support/Resistance Levels",
-            "Gap Analysis", "Trading Signals"
+            "Gap Analysis", "Trading Signals",
+            "Smart Redis Caching"
         ],
-        "cache_size": len(data_cache.cache),
-        "error_handling": "Returns errors when real data unavailable",
+        "cache_status": cache_manager.get_cache_stats(),
         "endpoints": {
             "analysis": "/analysis?ticker=SYMBOL&interval=1d&period=1mo",
             "signals": "/signals?ticker=SYMBOL",
             "test_eodhd": "/test-eodhd?ticker=SYMBOL",
             "cache": "/cache/stats",
+            "cache_clear": "/cache/clear (POST)",
+            "cache_invalidate": "/cache/invalidate/TICKER (DELETE)",
             "health": "/health"
         }
     })
 
 @app.route("/analysis", methods=["GET"])
 def analysis_endpoint():
-    """Main technical analysis endpoint with complete feature set."""
+    """Main technical analysis endpoint with Redis caching."""
     ticker = request.args.get("ticker", "AAPL").strip()
     interval = request.args.get("interval", config.DEFAULT_INTERVAL)
     period = request.args.get("period", config.DEFAULT_PERIOD)
@@ -1009,9 +897,10 @@ def signals_endpoint():
         return jsonify({
             "ticker": result["ticker"],
             "data_source": result["data_source"],
+            "cache_status": result.get("cache_status", "unknown"),
             "last_price": result["last_price"],
-            "support_levels": result["support_levels"],       # SUPPORT INCLUDED
-            "resistance_levels": result["resistance_levels"], # RESISTANCE INCLUDED
+            "support_levels": result["support_levels"],
+            "resistance_levels": result["resistance_levels"],
             "signals": result["signals"],
             "signal_summary": result["signal_summary"],
             "last_updated": result["last_updated"]
@@ -1023,6 +912,37 @@ def signals_endpoint():
             "error": "Internal server error", 
             "details": str(e)
         }), 500
+
+@app.route("/cache/stats", methods=["GET"])
+def cache_stats():
+    """Get comprehensive Redis cache statistics."""
+    return jsonify(cache_manager.get_cache_stats())
+
+@app.route("/cache/clear", methods=["POST"])
+def clear_cache():
+    """Clear all Redis cache."""
+    try:
+        if cache_manager.redis_client:
+            cache_manager.redis_client.flushdb()
+            return jsonify({
+                "message": "Redis cache cleared successfully",
+                "timestamp": datetime.now().isoformat()
+            })
+        else:
+            return jsonify({"error": "Redis not available"}), 503
+    except Exception as e:
+        return jsonify({"error": f"Failed to clear cache: {str(e)}"}), 500
+
+@app.route("/cache/invalidate/<ticker>", methods=["DELETE"])
+def invalidate_cache(ticker):
+    """Invalidate cache for specific ticker."""
+    success = invalidate_ticker_cache(ticker.upper())
+    return jsonify({
+        "success": success,
+        "ticker": ticker.upper(),
+        "message": f"Cache {'invalidated' if success else 'not found'} for {ticker}",
+        "timestamp": datetime.now().isoformat()
+    })
 
 @app.route("/test-eodhd", methods=["GET"])
 def test_eodhd_endpoint():
@@ -1037,12 +957,14 @@ def test_eodhd_endpoint():
             "ticker": ticker,
             "eodhd_success": success,
             "data_points": len(data) if success else 0,
+            "cache_backend": "Redis",
             "features_included": [
                 "Historical OHLCV",
                 "Support/Resistance Detection",
                 "Technical Indicators",
                 "Gap Analysis",
-                "Trading Signals"
+                "Trading Signals",
+                "Redis Caching"
             ]
         }
         
@@ -1071,45 +993,33 @@ def test_eodhd_endpoint():
             "eodhd_success": False
         }), 500
 
-@app.route("/cache/stats", methods=["GET"])
-def cache_stats():
-    """Cache statistics endpoint."""
-    return jsonify({
-        "cache_size": len(data_cache.cache),
-        "max_cache_size": data_cache.max_size,
-        "ttl_seconds": data_cache.ttl_seconds,
-        "hit_count": data_cache.hit_count,
-        "miss_count": data_cache.miss_count,
-        "hit_rate": round(data_cache.hit_count / (data_cache.hit_count + data_cache.miss_count) * 100, 2) if (data_cache.hit_count + data_cache.miss_count) > 0 else 0
-    })
-
-@app.route("/cache/clear", methods=["POST"])
-def clear_cache():
-    """Clear cache endpoint."""
-    try:
-        data_cache.clear()
-        return jsonify({"message": "Cache cleared successfully"})
-    except Exception as e:
-        return jsonify({"error": f"Failed to clear cache: {str(e)}"}), 500
-
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Detailed health check."""
+    """Detailed health check with cache status."""
+    cache_stats = cache_manager.get_cache_stats()
+    
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "version": "2.3.0-eodhd-production",
+        "version": "2.4.0-redis-cache",
         "data_policy": "REAL MARKET DATA ONLY",
         "features": {
             "support_resistance": True,
             "technical_indicators": True,
             "gap_analysis": True,
             "trading_signals": True,
-            "caching": True,
+            "redis_caching": True,
+            "market_aware_ttl": True,
+            "popular_ticker_optimization": True,
             "real_data_only": True,
-            "sample_data_fallback": False  # Explicitly disabled
+            "sample_data_fallback": False
         },
         "data_source": "EODHD Professional Feed",
+        "cache_backend": {
+            "type": "Redis",
+            "status": cache_stats.get("redis_status", "unknown"),
+            "market_aware": True
+        },
         "error_policy": "Returns errors when real data unavailable"
     })
 
@@ -1132,6 +1042,6 @@ def internal_error(error):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info("Starting Production Technical Analysis Microservice - REAL DATA ONLY v2.3.0")
-    logger.info("Data Policy: EODHD real market data only - no sample data fallback")
+    logger.info("Starting Production Technical Analysis Microservice - Redis Cache v2.4.0")
+    logger.info("Data Policy: EODHD real market data only with Redis caching")
     app.run(host="0.0.0.0", port=port, debug=False)
