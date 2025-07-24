@@ -10,6 +10,7 @@ app = Flask(__name__)
 # ---------------------------
 
 def fetch_ohlcv(ticker, interval='1h', period='1mo'):
+    """Fetch OHLCV data from Yahoo Finance."""
     try:
         data = yf.download(ticker, period=period, interval=interval, progress=False, auto_adjust=True)
         return data
@@ -17,9 +18,11 @@ def fetch_ohlcv(ticker, interval='1h', period='1mo'):
         return pd.DataFrame()
 
 def calculate_vwap(df):
+    """Calculate VWAP."""
     return (df['Close'] * df['Volume']).cumsum() / df['Volume'].cumsum()
 
 def detect_gaps(df):
+    """Detect price gaps (gap-ups and gap-downs)."""
     gaps = []
     prev_close = None
     for i in range(len(df)):
@@ -35,6 +38,7 @@ def detect_gaps(df):
     return gaps
 
 def find_support_resistance(df, num_levels=2):
+    """Find major support and resistance using pivot highs/lows."""
     highs = df['High'].rolling(window=5, center=True).max()
     lows = df['Low'].rolling(window=5, center=True).min()
 
@@ -42,17 +46,17 @@ def find_support_resistance(df, num_levels=2):
     support_levels = sorted(lows.dropna().unique())[:num_levels]
 
     return {
-        "support_levels": [float(round(s, 2)) for s in support_levels],
-        "resistance_levels": [float(round(r, 2)) for r in resistance_levels]
+        "support_levels": [round(s, 2) for s in support_levels],
+        "resistance_levels": [round(r, 2) for r in resistance_levels]
     }
 
 def calculate_indicators(ticker, interval='1h', period='1mo'):
+    """Calculate all technical indicators with proper validation."""
     df = fetch_ohlcv(ticker, interval, period)
 
     if df.empty or not all(col in df.columns for col in ['Open', 'High', 'Low', 'Close', 'Volume']):
         return {"error": f"No valid OHLCV data found for {ticker} with interval {interval} and period {period}."}
 
-    # Convert columns to numeric
     for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     df = df.dropna()
@@ -65,59 +69,90 @@ def calculate_indicators(ticker, interval='1h', period='1mo'):
     low_series = df['Low']
 
     # Indicators
-    rsi = ta.rsi(close_series, length=14)
-    if isinstance(rsi, (float, int)):
-        rsi = pd.Series([rsi], index=[df.index[-1]])
-    df['RSI'] = rsi
-
+    df['RSI'] = ta.rsi(close_series, length=14)
     macd = ta.macd(close_series, fast=12, slow=26, signal=9)
-    if isinstance(macd, pd.Series):
-        macd = macd.to_frame().T
-
     df['EMA_20'] = ta.ema(close_series, length=20)
     df['EMA_50'] = ta.ema(close_series, length=50)
     df['EMA_200'] = ta.ema(close_series, length=200)
-
     bbands = ta.bbands(close_series, length=20, std=2)
-    if isinstance(bbands, pd.Series):
-        bbands = bbands.to_frame().T
-
     df['ATR'] = ta.atr(high_series, low_series, close_series, length=14)
     df['VWAP'] = calculate_vwap(df)
-
-    latest = df.iloc[-1]
     s_r = find_support_resistance(df)
 
+    latest = df.iloc[-1]
     return {
         "ticker": ticker.upper(),
         "interval": interval,
-        "last_price": float(round(latest['Close'], 2)),
-        "rsi": float(round(latest.get('RSI', 0), 2)) if 'RSI' in latest else None,
+        "last_price": round(latest['Close'], 2),
+        "rsi": round(latest['RSI'], 2),
         "macd": {
-            "macd": float(round(macd.iloc[-1]['MACD_12_26_9'], 2)) if macd is not None else None,
-            "signal": float(round(macd.iloc[-1]['MACDs_12_26_9'], 2)) if macd is not None else None,
-            "hist": float(round(macd.iloc[-1]['MACDh_12_26_9'], 2)) if macd is not None else None
-        } if macd is not None else None,
+            "macd": round(macd.iloc[-1]['MACD_12_26_9'], 2),
+            "signal": round(macd.iloc[-1]['MACDs_12_26_9'], 2),
+            "hist": round(macd.iloc[-1]['MACDh_12_26_9'], 2),
+        },
         "ema": {
-            "ema_20": float(round(latest.get('EMA_20', 0), 2)),
-            "ema_50": float(round(latest.get('EMA_50', 0), 2)),
-            "ema_200": float(round(latest.get('EMA_200', 0), 2))
+            "ema_20": round(latest['EMA_20'], 2),
+            "ema_50": round(latest['EMA_50'], 2),
+            "ema_200": round(latest['EMA_200'], 2)
         },
         "bollinger": {
-            "upper": float(round(bbands.iloc[-1]['BBU_20_2.0'], 2)) if bbands is not None else None,
-            "middle": float(round(bbands.iloc[-1]['BBM_20_2.0'], 2)) if bbands is not None else None,
-            "lower": float(round(bbands.iloc[-1]['BBL_20_2.0'], 2)) if bbands is not None else None
-        } if bbands is not None else None,
-        "atr": float(round(latest['ATR'], 2)),
-        "vwap": float(round(latest['VWAP'], 2)),
+            "upper": round(bbands.iloc[-1]['BBU_20_2.0'], 2),
+            "middle": round(bbands.iloc[-1]['BBM_20_2.0'], 2),
+            "lower": round(bbands.iloc[-1]['BBL_20_2.0'], 2)
+        },
+        "atr": round(latest['ATR'], 2),
+        "vwap": round(latest['VWAP'], 2),
         "support": s_r["support_levels"],
         "resistance": s_r["resistance_levels"],
         "gaps": detect_gaps(df)
     }
 
+def generate_signals(data):
+    """Generate human-readable trade signals."""
+    if "error" in data:
+        return [data["error"]]
+    signals = []
+    if data.get('rsi') is not None:
+        if data['rsi'] > 70:
+            signals.append(f"{data['ticker']} is overbought (RSI {data['rsi']})")
+        elif data['rsi'] < 30:
+            signals.append(f"{data['ticker']} is oversold (RSI {data['rsi']})")
+    if data.get('last_price') and data.get('vwap'):
+        if data['last_price'] > data['vwap']:
+            signals.append("Price is above VWAP (bullish intraday trend).")
+        else:
+            signals.append("Price is below VWAP (bearish intraday trend).")
+    if data.get('last_price') and data.get('ema', {}).get('ema_50'):
+        if data['last_price'] > data['ema']['ema_50']:
+            signals.append("Price is above EMA-50, bullish momentum.")
+        else:
+            signals.append("Price is below EMA-50, caution.")
+    return signals
+
 # ---------------------------
 # API Endpoints
 # ---------------------------
+
+@app.route("/health", methods=["GET"])
+def health_check():
+    return jsonify({"status": "ok", "message": "TA Microservice is healthy"}), 200
+
+@app.route("/ohlcv", methods=["GET"])
+def ohlcv_endpoint():
+    ticker = request.args.get("ticker", "AAPL")
+    interval = request.args.get("interval", "1d")
+    period = request.args.get("period", "1mo")
+    df = fetch_ohlcv(ticker, interval, period)
+
+    if df.empty:
+        return jsonify({"error": f"No OHLCV data for {ticker}."}), 400
+
+    df_reset = df.reset_index()
+    df_reset[df_reset.columns[0]] = df_reset[df_reset.columns[0]].astype(str)
+    return jsonify({
+        "ticker": ticker.upper(),
+        "ohlcv": df_reset.to_dict(orient="records")
+    })
 
 @app.route("/ta", methods=["GET"])
 def ta_endpoint():
@@ -126,7 +161,26 @@ def ta_endpoint():
     period = request.args.get("period", "1mo")
     try:
         data = calculate_indicators(ticker, interval, period)
+        if "error" in data:
+            return jsonify(data), 400
         return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": "An unexpected server error occurred.", "details": str(e)}), 500
+
+@app.route("/signals", methods=["GET"])
+def signals_endpoint():
+    ticker = request.args.get("ticker", "AAPL")
+    interval = request.args.get("interval", "1d")
+    period = request.args.get("period", "1mo")
+    try:
+        data = calculate_indicators(ticker, interval, period)
+        signals = generate_signals(data)
+        if "error" in data:
+            return jsonify({"error": signals[0]}), 400
+        return jsonify({
+            "ticker": ticker.upper(),
+            "signals": signals
+        })
     except Exception as e:
         return jsonify({"error": "An unexpected server error occurred.", "details": str(e)}), 500
 
@@ -136,17 +190,16 @@ def debug_endpoint():
     interval = request.args.get("interval", "1d")
     period = request.args.get("period", "1mo")
     df = fetch_ohlcv(ticker, interval, period)
-    try:
-        return jsonify({
-            "columns": list(df.columns),
-            "sample_data": df.tail(5).reset_index().to_dict(orient="records")
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
-@app.route("/health", methods=["GET"])
-def health_endpoint():
-    return jsonify({"status": "ok", "message": "TA Microservice is healthy."})
+    if df.empty:
+        return jsonify({"error": f"No data found for {ticker}."}), 400
+
+    df_reset = df.tail(5).reset_index()
+    df_reset[df_reset.columns[0]] = df_reset[df_reset.columns[0]].astype(str)
+    return jsonify({
+        "columns": list(df_reset.columns),
+        "sample_data": df_reset.to_dict(orient="records")
+    })
 
 @app.route("/", methods=["GET"])
 def root():
@@ -157,3 +210,4 @@ def root():
 # ---------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
