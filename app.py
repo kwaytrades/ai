@@ -1045,3 +1045,103 @@ if __name__ == "__main__":
     logger.info("Starting Production Technical Analysis Microservice - Redis Cache v2.4.0")
     logger.info("Data Policy: EODHD real market data only with Redis caching")
     app.run(host="0.0.0.0", port=port, debug=False)
+
+@app.route("/debug/cache-write", methods=["GET"])
+def debug_cache_write():
+    """Debug cache write operations."""
+    ticker = request.args.get("ticker", "AAPL").strip().upper()
+    
+    try:
+        # Test basic Redis write
+        if cache_manager.redis_client:
+            # Test 1: Basic Redis write
+            cache_manager.redis_client.set("test_key", "test_value", ex=60)
+            test_read = cache_manager.redis_client.get("test_key")
+            
+            # Test 2: Cache key generation
+            cache_key = cache_manager.get_cache_key(ticker, "1d", "1mo")
+            
+            # Test 3: TTL calculation
+            ttl = cache_manager.get_cache_ttl(ticker)
+            
+            # Test 4: Try to cache some sample data
+            sample_data = {
+                "test": "data",
+                "timestamp": datetime.now().isoformat(),
+                "ticker": ticker
+            }
+            
+            write_success = cache_manager.set_cached_data(ticker, "1d", "1mo", sample_data)
+            
+            # Test 5: Try to read it back
+            cached_data = cache_manager.get_cached_data(ticker, "1d", "1mo")
+            
+            return jsonify({
+                "redis_connected": True,
+                "basic_write_test": test_read == "test_value",
+                "cache_key_generated": cache_key,
+                "calculated_ttl": ttl,
+                "sample_write_success": write_success,
+                "sample_read_back": cached_data is not None,
+                "cached_data_preview": str(cached_data)[:200] if cached_data else None,
+                "redis_keys_count": len(cache_manager.redis_client.keys("*")),
+                "all_keys": cache_manager.redis_client.keys("*")
+            })
+        else:
+            return jsonify({"error": "Redis not connected"})
+            
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        })
+
+@app.route("/debug/full-flow", methods=["GET"])  
+def debug_full_flow():
+    """Debug the complete cache flow with real data."""
+    ticker = request.args.get("ticker", "AAPL").strip().upper()
+    
+    try:
+        # Step 1: Clear any existing cache for this ticker
+        invalidate_ticker_cache(ticker)
+        
+        # Step 2: Fetch data (should be cache miss)
+        df, source = fetch_ohlcv_robust(ticker, "1d", "1mo")
+        
+        # Step 3: Check if data was cached
+        cached_after = get_cached_analysis(ticker, "1d", "1mo")
+        
+        # Step 4: Check Redis directly
+        if cache_manager.redis_client:
+            redis_keys = cache_manager.redis_client.keys("*")
+            cache_key = cache_manager.get_cache_key(ticker, "1d", "1mo")
+            direct_redis_get = cache_manager.redis_client.get(cache_key)
+        else:
+            redis_keys = []
+            direct_redis_get = None
+            
+        return jsonify({
+            "step_1_cache_cleared": True,
+            "step_2_data_fetch": {
+                "success": not df.empty,
+                "source": source,
+                "data_points": len(df) if not df.empty else 0
+            },
+            "step_3_cache_check": {
+                "cached_data_found": cached_after is not None,
+                "cached_data_type": type(cached_data).__name__ if cached_after else None
+            },
+            "step_4_redis_direct": {
+                "total_keys_in_redis": len(redis_keys),
+                "redis_keys": redis_keys,
+                "direct_get_result": direct_redis_get is not None,
+                "cache_key_used": cache_key if cache_manager.redis_client else None
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
