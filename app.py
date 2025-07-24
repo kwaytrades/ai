@@ -306,7 +306,7 @@ def generate_realistic_sample_data(ticker: str, period: str = '1mo') -> pd.DataF
 # ---------------------------
 
 def fetch_ohlcv_robust(ticker: str, interval: str = '1d', period: str = '1mo') -> Tuple[pd.DataFrame, str]:
-    """Production data fetching with EODHD + fallback."""
+    """Production data fetching with EODHD - NO FALLBACK TO SAMPLE DATA."""
     
     # Check cache first
     cached_result = data_cache.get(ticker, interval, period)
@@ -315,7 +315,7 @@ def fetch_ohlcv_robust(ticker: str, interval: str = '1d', period: str = '1mo') -
         return data, source
     
     try:
-        # Method 1: Try EODHD (real market data)
+        # Method 1: Try EODHD (real market data ONLY)
         logger.info(f"Attempting EODHD fetch for {ticker}")
         eodhd_data, eodhd_success = eodhd.get_historical_data(ticker, period)
         
@@ -326,17 +326,17 @@ def fetch_ohlcv_robust(ticker: str, interval: str = '1d', period: str = '1mo') -
             if data_valid:
                 data_cache.set(ticker, interval, period, eodhd_data, "eodhd")
                 return eodhd_data, "eodhd"
+            else:
+                logger.error(f"EODHD data validation failed for {ticker}: {validation_msg}")
+                return pd.DataFrame(), "validation_failed"
         
-        # Method 2: Fallback to sample data
-        logger.warning(f"EODHD failed for {ticker}, using sample data")
-        sample_data = generate_realistic_sample_data(ticker, period)
-        data_cache.set(ticker, interval, period, sample_data, "sample")
-        return sample_data, "sample"
+        # NO FALLBACK - Return empty DataFrame to indicate failure
+        logger.error(f"EODHD failed for {ticker} - no fallback data")
+        return pd.DataFrame(), "eodhd_failed"
         
     except Exception as e:
-        logger.error(f"Critical error in fetch_ohlcv_robust: {str(e)}")
-        sample_data = generate_realistic_sample_data(ticker, period)
-        return sample_data, "sample"
+        logger.error(f"Critical error in fetch_ohlcv_robust for {ticker}: {str(e)}")
+        return pd.DataFrame(), "error"
 
 # ---------------------------
 # Complete Technical Analysis Functions
@@ -830,7 +830,7 @@ def generate_trading_signals(data: Dict[str, Any], indicators: Dict[str, Any]) -
     return signals
 
 def analyze_ticker(ticker: str, interval: str = '1d', period: str = '1mo') -> Dict[str, Any]:
-    """Complete technical analysis for a ticker with EODHD integration."""
+    """Complete technical analysis for a ticker with EODHD integration - REAL DATA ONLY."""
     
     # Validate inputs
     ticker_valid, ticker_result = validate_ticker(ticker)
@@ -846,21 +846,46 @@ def analyze_ticker(ticker: str, interval: str = '1d', period: str = '1mo') -> Di
     if not period_valid:
         return {"error": period_result}
     
-    # Fetch data
+    # Fetch data - REAL DATA ONLY
     df, source = fetch_ohlcv_robust(ticker, interval, period)
+    
+    # Handle data fetch failures
     if df.empty:
-        return {"error": f"No data available for {ticker} with interval {interval} and period {period}"}
+        error_messages = {
+            "eodhd_failed": f"Unable to fetch real market data for {ticker} from EODHD. Please verify ticker symbol and try again.",
+            "validation_failed": f"Data validation failed for {ticker}. The retrieved data appears to be corrupted or incomplete.",
+            "error": f"Technical error occurred while fetching data for {ticker}. Please try again later."
+        }
+        
+        error_msg = error_messages.get(source, f"No real market data available for {ticker}")
+        return {
+            "error": error_msg,
+            "ticker": ticker,
+            "data_source_attempted": "eodhd",
+            "suggestion": "Verify ticker symbol is correct and that the market is open. For non-US stocks, try adding the appropriate exchange suffix (e.g., 'TICKER.L' for London)."
+        }
+    
+    # Only proceed if we have REAL data
+    if source != "eodhd":
+        return {
+            "error": f"Only real market data is accepted. Source '{source}' is not permitted.",
+            "ticker": ticker
+        }
     
     # Validate data quality
     data_valid, validation_msg = validate_ohlcv_data(df)
     if not data_valid:
-        return {"error": validation_msg}
+        return {
+            "error": f"Data quality validation failed: {validation_msg}",
+            "ticker": ticker,
+            "data_source": source
+        }
     
     try:
         # Calculate gaps BEFORE any data modification
         gaps = detect_price_gaps(df)
         
-        # Find support/resistance levels - THIS IS WHAT YOU ASKED ABOUT
+        # Find support/resistance levels
         pivot_levels = find_pivot_levels(df)
         
         # Calculate technical indicators
@@ -869,12 +894,12 @@ def analyze_ticker(ticker: str, interval: str = '1d', period: str = '1mo') -> Di
         # Get latest price data
         latest = df.iloc[-1]
         
-        # Build response
+        # Build response - REAL DATA CONFIRMED
         response_data = {
             "ticker": ticker,
             "interval": interval,
             "period": period,
-            "data_source": source,
+            "data_source": source,  # Will always be "eodhd" for real data
             "last_updated": datetime.now().isoformat(),
             "data_points": len(df),
             "last_price": round(float(latest['Close']), 2),
@@ -883,13 +908,14 @@ def analyze_ticker(ticker: str, interval: str = '1d', period: str = '1mo') -> Di
                 "percent": round(float((latest['Close'] - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100), 2) if len(df) > 1 else 0
             },
             "volume": int(latest['Volume']) if pd.notna(latest['Volume']) else 0,
-            "support_levels": pivot_levels["support_levels"],      # HERE IS YOUR SUPPORT
-            "resistance_levels": pivot_levels["resistance_levels"], # HERE IS YOUR RESISTANCE
+            "support_levels": pivot_levels["support_levels"],
+            "resistance_levels": pivot_levels["resistance_levels"],
             "gaps": gaps,
-            "technical_indicators": indicators
+            "technical_indicators": indicators,
+            "data_quality": "real_market_data"  # Explicit confirmation
         }
         
-        # Generate trading signals (includes support/resistance signals)
+        # Generate trading signals
         signals = generate_trading_signals(response_data, indicators)
         response_data["signals"] = signals
         response_data["signal_summary"] = {
@@ -901,15 +927,15 @@ def analyze_ticker(ticker: str, interval: str = '1d', period: str = '1mo') -> Di
             "opportunities": len([s for s in signals if s.get('type') == 'opportunity'])
         }
         
-        # Add disclaimer if using sample data
-        if source == "sample":
-            response_data["disclaimer"] = "Using sample data for demonstration. Real market data unavailable."
-        
         return response_data
         
     except Exception as e:
         logger.error(f"Error analyzing {ticker}: {str(e)}")
-        return {"error": f"Analysis failed: {str(e)}"}
+        return {
+            "error": f"Technical analysis failed for {ticker}: {str(e)}",
+            "data_source": source,
+            "ticker": ticker
+        }
 
 # ---------------------------
 # API Endpoints
@@ -919,20 +945,19 @@ def analyze_ticker(ticker: str, interval: str = '1d', period: str = '1mo') -> Di
 def root():
     """Health check endpoint."""
     return jsonify({
-        "service": "Technical Analysis Microservice - Production",
+        "service": "Technical Analysis Microservice - Production (Real Data Only)",
         "status": "healthy",
-        "version": "2.3.0-eodhd-complete",
+        "version": "2.3.0-eodhd-production",
         "timestamp": datetime.now().isoformat(),
-        "data_sources": {
-            "primary": "EODHD (Real Market Data)",
-            "fallback": "Sample Data"
-        },
+        "data_policy": "REAL MARKET DATA ONLY - No sample/demo data",
+        "data_source": "EODHD Professional Market Data",
         "features": [
             "RSI", "MACD", "EMA", "Bollinger Bands", "VWAP", "ATR",
-            "Support/Resistance Levels",  # YOUR QUESTION ANSWERED HERE
+            "Support/Resistance Levels",
             "Gap Analysis", "Trading Signals"
         ],
         "cache_size": len(data_cache.cache),
+        "error_handling": "Returns errors when real data unavailable",
         "endpoints": {
             "analysis": "/analysis?ticker=SYMBOL&interval=1d&period=1mo",
             "signals": "/signals?ticker=SYMBOL",
@@ -1070,16 +1095,19 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "version": "2.3.0-eodhd-complete",
+        "version": "2.3.0-eodhd-production",
+        "data_policy": "REAL MARKET DATA ONLY",
         "features": {
-            "support_resistance": True,  # YOUR ANSWER
+            "support_resistance": True,
             "technical_indicators": True,
             "gap_analysis": True,
             "trading_signals": True,
             "caching": True,
-            "real_data": True
+            "real_data_only": True,
+            "sample_data_fallback": False  # Explicitly disabled
         },
-        "data_source": "EODHD + Sample fallback"
+        "data_source": "EODHD Professional Feed",
+        "error_policy": "Returns errors when real data unavailable"
     })
 
 # Legacy endpoints
@@ -1101,5 +1129,6 @@ def internal_error(error):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    logger.info("Starting Complete Technical Analysis Microservice with EODHD v2.3.0")
+    logger.info("Starting Production Technical Analysis Microservice - REAL DATA ONLY v2.3.0")
+    logger.info("Data Policy: EODHD real market data only - no sample data fallback")
     app.run(host="0.0.0.0", port=port, debug=False)
