@@ -1,7 +1,5 @@
-Flask
-pandas
-pandas-ta
-yfinance
-gunicorn
-setuptools
-numpy<2.0
+flask==2.3.3
+pandas==2.0.3
+pandas-ta==0.3.14b0
+yfinance==0.2.18
+gunicorn==21.2.0
