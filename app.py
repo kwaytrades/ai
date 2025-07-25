@@ -1547,6 +1547,132 @@ def debug_basic_auth():
     except Exception as e:
         return jsonify({"error": str(e)})
 
+@app.route("/debug/cache-keys", methods=["GET"])
+def debug_cache_keys():
+    """Debug what's actually in Redis cache."""
+    try:
+        if cache_manager.use_rest_api:
+            # Get all keys from Redis
+            response = requests.get(
+                f"{cache_manager.upstash_url}/keys/*",
+                headers={"Authorization": f"Bearer {cache_manager.upstash_token}"},
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                all_keys = result.get('result', [])
+                
+                # Get values for a few keys to see the data
+                key_data = {}
+                for key in all_keys[:5]:  # Check first 5 keys
+                    get_response = requests.get(
+                        f"{cache_manager.upstash_url}/get/{key}",
+                        headers={"Authorization": f"Bearer {cache_manager.upstash_token}"},
+                        timeout=5
+                    )
+                    if get_response.status_code == 200:
+                        key_result = get_response.json()
+                        key_data[key] = {
+                            "exists": bool(key_result.get('result')),
+                            "data_preview": str(key_result.get('result', ''))[:100]
+                        }
+                
+                # Test key generation for a known ticker
+                test_key = cache_manager.get_cache_key("AAPL", "1d", "1mo")
+                
+                return jsonify({
+                    "total_keys": len(all_keys),
+                    "all_keys": all_keys,
+                    "key_data_sample": key_data,
+                    "test_key_generation": {
+                        "aapl_key": test_key,
+                        "key_in_redis": test_key in all_keys
+                    },
+                    "cache_manager_info": {
+                        "use_rest_api": cache_manager.use_rest_api,
+                        "upstash_url": cache_manager.upstash_url[:30] + "..."
+                    }
+                })
+            else:
+                return jsonify({"error": f"Failed to get keys: {response.status_code}"})
+                
+        elif cache_manager.redis_client:
+            # Direct Redis
+            all_keys = cache_manager.redis_client.keys("*")
+            return jsonify({
+                "total_keys": len(all_keys),
+                "all_keys": all_keys,
+                "connection_type": "direct_redis"
+            })
+        else:
+            return jsonify({"error": "No Redis connection"})
+            
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+
+@app.route("/debug/test-cache-flow", methods=["GET"])
+def debug_test_cache_flow():
+    """Test the complete cache read/write flow."""
+    ticker = request.args.get("ticker", "TEST").upper()
+    
+    try:
+        # Step 1: Generate cache key
+        cache_key = cache_manager.get_cache_key(ticker, "1d", "1mo")
+        
+        # Step 2: Test data to cache
+        test_data = {
+            "ticker": ticker,
+            "test_timestamp": datetime.now().isoformat(),
+            "data": {"price": 123.45, "volume": 1000000}
+        }
+        
+        # Step 3: Write to cache
+        write_success = cache_manager.set_cached_data(ticker, "1d", "1mo", test_data)
+        
+        # Step 4: Immediately try to read it back
+        read_data = cache_manager.get_cached_data(ticker, "1d", "1mo")
+        
+        # Step 5: Check if key exists in Redis directly
+        key_exists = False
+        if cache_manager.use_rest_api:
+            check_response = requests.get(
+                f"{cache_manager.upstash_url}/get/{cache_key}",
+                headers={"Authorization": f"Bearer {cache_manager.upstash_token}"},
+                timeout=5
+            )
+            key_exists = check_response.status_code == 200 and check_response.json().get('result')
+        
+        return jsonify({
+            "cache_key": cache_key,
+            "write_attempt": {
+                "success": write_success,
+                "data_written": test_data
+            },
+            "read_attempt": {
+                "success": read_data is not None,
+                "data_read": read_data,
+                "matches_written": read_data == test_data if read_data else False
+            },
+            "redis_direct_check": {
+                "key_exists": key_exists,
+                "cache_key_used": cache_key
+            },
+            "debug_info": {
+                "ttl": cache_manager.get_cache_ttl(ticker),
+                "use_rest_api": cache_manager.use_rest_api
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+
 @app.route("/metrics", methods=["GET"])
 def get_metrics():
     """Get comprehensive service metrics."""
