@@ -150,7 +150,7 @@ class CacheManager:
             return self.cache_times["ondemand"]
     
     def get_cached_data(self, ticker: str, interval: str, period: str) -> Optional[Dict[Any, Any]]:
-        """Get cached data using REST API or direct Redis."""
+        """Get cached data using REST API or direct Redis - FIXED VERSION."""
         key = self.get_cache_key(ticker, interval, period)
         
         try:
@@ -164,10 +164,24 @@ class CacheManager:
                 
                 if response.status_code == 200:
                     result = response.json()
-                    if result.get('result'):
-                        data = json.loads(result['result'])
-                        logger.debug(f"REST API Cache HIT for {key}")
-                        return data
+                    raw_data = result.get('result')
+                    
+                    if raw_data:
+                        try:
+                            # Handle different response formats from Upstash
+                            if isinstance(raw_data, str):
+                                # If it's a string, parse it as JSON
+                                data = json.loads(raw_data)
+                            else:
+                                # If it's already a dict, use it directly
+                                data = raw_data
+                            
+                            logger.debug(f"REST API Cache HIT for {key}")
+                            return data
+                            
+                        except json.JSONDecodeError as e:
+                            logger.error(f"JSON decode error for {key}: {e}, raw_data type: {type(raw_data)}")
+                            return None
                     else:
                         logger.debug(f"REST API Cache MISS for {key}")
                         return None
@@ -194,7 +208,7 @@ class CacheManager:
             return None
     
     def set_cached_data(self, ticker: str, interval: str, period: str, data: Dict[Any, Any]) -> bool:
-        """Set cached data using REST API or direct Redis."""
+        """Set cached data using REST API or direct Redis - FIXED VERSION."""
         key = self.get_cache_key(ticker, interval, period)
         ttl = self.get_cache_ttl(ticker)
         
@@ -203,11 +217,14 @@ class CacheManager:
             serialized_data = json.dumps(data, default=self._json_serializer)
             
             if self.use_rest_api:
-                # Use Upstash REST API with correct format
+                # Use Upstash REST API with correct format - NO DOUBLE QUOTING
                 response = requests.post(
                     f"{self.upstash_url}/setex/{key}/{ttl}",
-                    headers={"Authorization": f"Bearer {self.upstash_token}"},
-                    data=f'"{serialized_data}"',  # Upstash expects quoted JSON string
+                    headers={
+                        "Authorization": f"Bearer {self.upstash_token}",
+                        "Content-Type": "application/json"
+                    },
+                    data=serialized_data,  # Send raw JSON string, not double-quoted
                     timeout=5
                 )
                 
@@ -246,7 +263,7 @@ class CacheManager:
                 if interval and period:
                     # Invalidate specific cache
                     key = self.get_cache_key(ticker, interval, period)
-                    response = requests.delete(
+                    response = requests.post(  # Changed from DELETE to POST for Upstash compatibility
                         f"{self.upstash_url}/del/{key}",
                         headers={"Authorization": f"Bearer {self.upstash_token}"},
                         timeout=5
@@ -270,7 +287,7 @@ class CacheManager:
                         
                         deleted_count = 0
                         for key in keys_to_delete:
-                            del_response = requests.delete(
+                            del_response = requests.post(  # Changed from DELETE to POST
                                 f"{self.upstash_url}/del/{key}",
                                 headers={"Authorization": f"Bearer {self.upstash_token}"},
                                 timeout=5
@@ -287,13 +304,11 @@ class CacheManager:
                 if interval and period:
                     # Invalidate specific cache
                     key = self.get_cache_key(ticker, interval, period)
-                    keys_to_delete = [key, f"meta:{key}"]
+                    keys_to_delete = [key]  # Remove meta keys since we don't use them in REST API
                 else:
                     # Invalidate all cache for ticker
                     pattern = f"ta:{ticker.upper()}:*"
                     keys_to_delete = self.redis_client.keys(pattern)
-                    meta_keys = [f"meta:{key}" for key in keys_to_delete]
-                    keys_to_delete.extend(meta_keys)
                 
                 if keys_to_delete:
                     deleted = self.redis_client.delete(*keys_to_delete)
