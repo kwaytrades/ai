@@ -1315,3 +1315,76 @@ def debug_rest_api():
             "error": str(e),
             "traceback": traceback.format_exc()
         })
+@app.route("/debug/auth-formats", methods=["GET"])
+def debug_auth_formats():
+    """Test different authentication formats."""
+    upstash_url = os.getenv('UPSTASH_REDIS_REST_URL')
+    upstash_token = os.getenv('UPSTASH_REDIS_REST_TOKEN')
+    
+    if not upstash_url or not upstash_token:
+        return jsonify({"error": "Credentials not set"})
+    
+    results = {}
+    
+    # Test different auth header formats
+    auth_formats = [
+        {"name": "Bearer", "header": f"Bearer {upstash_token}"},
+        {"name": "Basic", "header": f"Basic {upstash_token}"},
+        {"name": "Token", "header": f"Token {upstash_token}"},
+        {"name": "Plain", "header": upstash_token}
+    ]
+    
+    for auth_format in auth_formats:
+        try:
+            response = requests.post(
+                f"{upstash_url}/ping",
+                headers={"Authorization": auth_format["header"]},
+                timeout=5
+            )
+            
+            results[auth_format["name"]] = {
+                "status_code": response.status_code,
+                "success": response.status_code == 200,
+                "response": response.text[:100] if response.text else None
+            }
+            
+        except Exception as e:
+            results[auth_format["name"]] = {
+                "error": str(e)
+            }
+    
+    return jsonify({
+        "url_preview": upstash_url,
+        "token_length": len(upstash_token),
+        "token_preview": upstash_token[:10] + "..." + upstash_token[-10:],
+        "auth_tests": results
+    })
+
+@app.route("/debug/basic-auth", methods=["GET"])
+def debug_basic_auth():
+    """Test Upstash with Basic Authentication."""
+    upstash_url = os.getenv('UPSTASH_REDIS_REST_URL')
+    upstash_token = os.getenv('UPSTASH_REDIS_REST_TOKEN')
+    
+    try:
+        import base64
+        
+        # Try Basic Auth with empty username and token as password
+        auth_string = base64.b64encode(f":{upstash_token}".encode()).decode()
+        
+        response = requests.post(
+            f"{upstash_url}/ping",
+            headers={"Authorization": f"Basic {auth_string}"},
+            timeout=5
+        )
+        
+        return jsonify({
+            "basic_auth_test": {
+                "status_code": response.status_code,
+                "success": response.status_code == 200,
+                "response": response.text if response.status_code != 200 else "SUCCESS"
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)})
