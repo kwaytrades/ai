@@ -1255,14 +1255,11 @@ def debug_simple_redis():
             "error_type": type(e).__name__,
             "traceback": traceback.format_exc()
         })
-@app.route("/debug/rest-api", methods=["GET"])
-def debug_rest_api():
-    """Test Upstash REST API directly."""
+@app.route("/debug/rest-api-fixed", methods=["GET"])
+def debug_rest_api_fixed():
+    """Test Upstash REST API with correct format."""
     upstash_url = os.getenv('UPSTASH_REDIS_REST_URL')
     upstash_token = os.getenv('UPSTASH_REDIS_REST_TOKEN')
-    
-    if not upstash_url or not upstash_token:
-        return jsonify({"error": "REST API credentials not set"})
     
     try:
         # Test ping
@@ -1272,41 +1269,37 @@ def debug_rest_api():
             timeout=10
         )
         
-        # Test set/get
+        # Test set with correct format (like the curl example)
         set_response = requests.post(
             f"{upstash_url}/setex/test_key/60",
-            headers={
-                "Authorization": f"Bearer {upstash_token}",
-                "Content-Type": "application/json"
-            },
-            json={"value": "test_value"},
+            headers={"Authorization": f"Bearer {upstash_token}"},
+            data='"test_value"',  # Quoted string like curl example
             timeout=5
         )
         
-        get_response = requests.post(
+        # Test get
+        get_response = requests.get(
             f"{upstash_url}/get/test_key",
             headers={"Authorization": f"Bearer {upstash_token}"},
             timeout=5
         )
         
         return jsonify({
+            "token_updated": True,
             "ping_test": {
                 "status_code": ping_response.status_code,
-                "success": ping_response.status_code == 200
+                "success": ping_response.status_code == 200,
+                "response": ping_response.text[:100]
             },
             "set_test": {
                 "status_code": set_response.status_code,
-                "success": set_response.status_code == 200
+                "success": set_response.status_code == 200,
+                "response": set_response.text[:100]
             },
             "get_test": {
                 "status_code": get_response.status_code,
                 "success": get_response.status_code == 200,
-                "result": get_response.json() if get_response.status_code == 200 else None
-            },
-            "cache_manager_status": {
-                "use_rest_api": getattr(cache_manager, 'use_rest_api', False),
-                "redis_client_exists": getattr(cache_manager, 'redis_client', None) is not None,
-                "cache_manager_type": type(cache_manager).__name__
+                "result": get_response.json() if get_response.status_code == 200 else get_response.text[:100]
             }
         })
         
@@ -1315,6 +1308,7 @@ def debug_rest_api():
             "error": str(e),
             "traceback": traceback.format_exc()
         })
+
 @app.route("/debug/auth-formats", methods=["GET"])
 def debug_auth_formats():
     """Test different authentication formats."""
