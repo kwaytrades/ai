@@ -1614,6 +1614,194 @@ def debug_cache_keys():
             "traceback": traceback.format_exc()
         })
 
+@app.route("/debug/analysis-flow", methods=["GET"])
+def debug_analysis_flow():
+    """Debug the complete analysis flow to find cache issues."""
+    ticker = request.args.get("ticker", "DEBUGTEST").upper()
+    interval = "1d"
+    period = "1mo"
+    
+    debug_info = {
+        "ticker": ticker,
+        "steps": [],
+        "cache_operations": [],
+        "final_result": None
+    }
+    
+    try:
+        # Step 1: Check cache before analysis
+        debug_info["steps"].append("1. Checking cache before analysis")
+        cache_key = cache_manager.get_cache_key(ticker, interval, period)
+        cached_before = cache_manager.get_cached_data(ticker, interval, period)
+        
+        debug_info["cache_operations"].append({
+            "operation": "get_cached_data_before",
+            "cache_key": cache_key,
+            "result": "HIT" if cached_before else "MISS",
+            "data_exists": cached_before is not None,
+            "data_type": type(cached_before).__name__ if cached_before else None
+        })
+        
+        if cached_before:
+            debug_info["steps"].append("2. Cache HIT - should return cached data")
+            debug_info["final_result"] = "CACHE_HIT"
+            return jsonify(debug_info)
+        
+        # Step 2: Simulate fetching new data (don't actually call EODHD to save API calls)
+        debug_info["steps"].append("2. Cache MISS - simulating new data fetch")
+        
+        # Create mock data similar to what EODHD returns
+        mock_data = {
+            'ohlcv_data': {
+                '2025-07-20T00:00:00': {'Open': 150.0, 'High': 155.0, 'Low': 148.0, 'Close': 152.0, 'Volume': 1000000},
+                '2025-07-21T00:00:00': {'Open': 152.0, 'High': 156.0, 'Low': 150.0, 'Close': 154.0, 'Volume': 1100000},
+                '2025-07-22T00:00:00': {'Open': 154.0, 'High': 158.0, 'Low': 152.0, 'Close': 156.0, 'Volume': 1200000}
+            },
+            'data_source': 'mock_eodhd',
+            'cached_at': datetime.now().isoformat()
+        }
+        
+        # Step 3: Try to cache the data
+        debug_info["steps"].append("3. Attempting to cache mock data")
+        cache_success = cache_manager.set_cached_data(ticker, interval, period, mock_data)
+        
+        debug_info["cache_operations"].append({
+            "operation": "set_cached_data",
+            "cache_key": cache_key,
+            "success": cache_success,
+            "data_written": mock_data
+        })
+        
+        # Step 4: Immediately try to read it back
+        debug_info["steps"].append("4. Immediately reading back cached data")
+        cached_after = cache_manager.get_cached_data(ticker, interval, period)
+        
+        debug_info["cache_operations"].append({
+            "operation": "get_cached_data_after",
+            "cache_key": cache_key,
+            "result": "HIT" if cached_after else "MISS",
+            "data_exists": cached_after is not None,
+            "data_matches": cached_after == mock_data if cached_after else False,
+            "data_read": cached_after
+        })
+        
+        # Step 5: Check what's actually in Redis
+        debug_info["steps"].append("5. Checking Redis directly")
+        if cache_manager.use_rest_api:
+            direct_response = requests.get(
+                f"{cache_manager.upstash_url}/get/{cache_key}",
+                headers={"Authorization": f"Bearer {cache_manager.upstash_token}"},
+                timeout=5
+            )
+            
+            if direct_response.status_code == 200:
+                redis_result = direct_response.json()
+                debug_info["cache_operations"].append({
+                    "operation": "direct_redis_check",
+                    "redis_response": redis_result,
+                    "raw_data": redis_result.get('result'),
+                    "raw_data_type": type(redis_result.get('result')).__name__
+                })
+            else:
+                debug_info["cache_operations"].append({
+                    "operation": "direct_redis_check",
+                    "error": f"HTTP {direct_response.status_code}",
+                    "response": direct_response.text
+                })
+        
+        # Final assessment
+        if cached_after == mock_data:
+            debug_info["final_result"] = "SUCCESS - Cache working correctly"
+        elif cached_after is not None:
+            debug_info["final_result"] = "PARTIAL - Data cached but doesn't match"
+        else:
+            debug_info["final_result"] = "FAILED - Data not retrievable from cache"
+        
+        return jsonify(debug_info)
+        
+    except Exception as e:
+        debug_info["steps"].append(f"ERROR: {str(e)}")
+        debug_info["final_result"] = "ERROR"
+        debug_info["error"] = str(e)
+        debug_info["traceback"] = traceback.format_exc()
+        return jsonify(debug_info)
+
+@app.route("/debug/fetch-function", methods=["GET"])
+def debug_fetch_function():
+    """Debug the fetch_ohlcv_robust function specifically."""
+    ticker = request.args.get("ticker", "TESTFETCH").upper()
+    
+    try:
+        # Call the actual fetch function with debug logging
+        logger.info(f"DEBUG: Starting fetch for {ticker}")
+        
+        df, source = fetch_ohlcv_robust(ticker, "1d", "1mo")
+        
+        return jsonify({
+            "ticker": ticker,
+            "fetch_result": {
+                "data_found": not df.empty,
+                "data_points": len(df) if not df.empty else 0,
+                "source": source,
+                "columns": list(df.columns) if not df.empty else []
+            },
+            "cache_check": {
+                "cache_key": cache_manager.get_cache_key(ticker, "1d", "1mo"),
+                "cached_data_exists": cache_manager.get_cached_data(ticker, "1d", "1mo") is not None
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+
+@app.route("/debug/simple-cache-test", methods=["GET"])
+def debug_simple_cache_test():
+    """Ultra-simple cache test with minimal data."""
+    
+    try:
+        # Use a simple key and simple data
+        test_key = "simple_test"
+        simple_data = {"message": "hello", "number": 42, "timestamp": datetime.now().isoformat()}
+        
+        # Manual cache operations
+        cache_key = f"ta:{test_key}:1d:1mo"
+        
+        # Write directly using cache manager
+        write_result = cache_manager.set_cached_data(test_key, "1d", "1mo", simple_data)
+        
+        # Read directly using cache manager  
+        read_result = cache_manager.get_cached_data(test_key, "1d", "1mo")
+        
+        # Also test the convenience functions
+        convenience_write = cache_analysis(test_key, "1d", "1mo", simple_data)
+        convenience_read = get_cached_analysis(test_key, "1d", "1mo")
+        
+        return jsonify({
+            "test_data": simple_data,
+            "cache_key": cache_key,
+            "direct_test": {
+                "write_success": write_result,
+                "read_success": read_result is not None,
+                "data_matches": read_result == simple_data if read_result else False,
+                "read_data": read_result
+            },
+            "convenience_test": {
+                "write_success": convenience_write,
+                "read_success": convenience_read is not None,
+                "data_matches": convenience_read == simple_data if convenience_read else False,
+                "read_data": convenience_read
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
+
 @app.route("/debug/test-cache-flow", methods=["GET"])
 def debug_test_cache_flow():
     """Test the complete cache read/write flow."""
