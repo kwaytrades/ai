@@ -9,12 +9,25 @@ from datetime import datetime, timedelta
 import requests
 import os
 from typing import Dict, List, Optional, Tuple, Any
-import time
-from collections import defaultdict, deque
-from threading import Lock
+
 
 # Import Redis cache manager
 from cache_manager import get_cached_analysis, cache_analysis, cache_manager, invalidate_ticker_cache
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+
+# ADD THIS ENTIRE SECTION HERE ↓
+
+import time
+from collections import defaultdict, deque
+from threading import Lock
 
 # Global metrics storage
 class MetricsCollector:
@@ -172,14 +185,6 @@ def after_request(response):
     
     return response
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
 
 # Configuration
 class Config:
