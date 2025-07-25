@@ -1145,3 +1145,17 @@ def debug_full_flow():
             "error": str(e),
             "traceback": traceback.format_exc()
         })
+
+@app.route("/debug/env", methods=["GET"])
+def debug_env():
+    """Check environment variables."""
+    redis_url = os.getenv('REDIS_URL', 'NOT_SET')
+    
+    return jsonify({
+        "redis_url_exists": redis_url != 'NOT_SET',
+        "redis_url_length": len(redis_url) if redis_url != 'NOT_SET' else 0,
+        "redis_url_preview": redis_url[:30] + "..." if len(redis_url) > 30 else redis_url,
+        "all_env_vars": {k: v[:20] + "..." if len(str(v)) > 20 else v 
+                        for k, v in os.environ.items() 
+                        if 'REDIS' in k.upper() or 'EODHD' in k.upper()}
+    })
