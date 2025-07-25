@@ -1255,3 +1255,62 @@ def debug_simple_redis():
             "error_type": type(e).__name__,
             "traceback": traceback.format_exc()
         })
+@app.route("/debug/rest-api", methods=["GET"])
+def debug_rest_api():
+    """Test Upstash REST API directly."""
+    upstash_url = os.getenv('UPSTASH_REDIS_REST_URL')
+    upstash_token = os.getenv('UPSTASH_REDIS_REST_TOKEN')
+    
+    if not upstash_url or not upstash_token:
+        return jsonify({"error": "REST API credentials not set"})
+    
+    try:
+        # Test ping
+        ping_response = requests.post(
+            f"{upstash_url}/ping",
+            headers={"Authorization": f"Bearer {upstash_token}"},
+            timeout=10
+        )
+        
+        # Test set/get
+        set_response = requests.post(
+            f"{upstash_url}/setex/test_key/60",
+            headers={
+                "Authorization": f"Bearer {upstash_token}",
+                "Content-Type": "application/json"
+            },
+            json={"value": "test_value"},
+            timeout=5
+        )
+        
+        get_response = requests.post(
+            f"{upstash_url}/get/test_key",
+            headers={"Authorization": f"Bearer {upstash_token}"},
+            timeout=5
+        )
+        
+        return jsonify({
+            "ping_test": {
+                "status_code": ping_response.status_code,
+                "success": ping_response.status_code == 200
+            },
+            "set_test": {
+                "status_code": set_response.status_code,
+                "success": set_response.status_code == 200
+            },
+            "get_test": {
+                "status_code": get_response.status_code,
+                "success": get_response.status_code == 200,
+                "result": get_response.json() if get_response.status_code == 200 else None
+            },
+            "cache_manager_status": {
+                "use_rest_api": cache_manager.use_rest_api,
+                "redis_client_exists": cache_manager.redis_client is not None
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        })
