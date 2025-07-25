@@ -9,9 +9,168 @@ from datetime import datetime, timedelta
 import requests
 import os
 from typing import Dict, List, Optional, Tuple, Any
+import time
+from collections import defaultdict, deque
+from threading import Lock
 
 # Import Redis cache manager
 from cache_manager import get_cached_analysis, cache_analysis, cache_manager, invalidate_ticker_cache
+
+# Global metrics storage
+class MetricsCollector:
+    def __init__(self):
+        self.lock = Lock()
+        self.start_time = datetime.now()
+        
+        # Request metrics
+        self.total_requests = 0
+        self.requests_by_endpoint = defaultdict(int)
+        self.requests_by_ticker = defaultdict(int)
+        self.recent_requests = deque(maxlen=100)  # Last 100 requests
+        
+        # Performance metrics
+        self.response_times = defaultdict(list)
+        self.cache_hits = 0
+        self.cache_misses = 0
+        
+        # Error tracking
+        self.errors_by_endpoint = defaultdict(int)
+        self.recent_errors = deque(maxlen=50)
+        
+        # Popular tickers tracking
+        self.ticker_request_count = defaultdict(int)
+        
+    def record_request(self, endpoint: str, ticker: str = None, response_time: float = 0, cache_status: str = None, error: bool = False):
+        with self.lock:
+            self.total_requests += 1
+            self.requests_by_endpoint[endpoint] += 1
+            
+            if ticker:
+                self.requests_by_ticker[ticker.upper()] += 1
+                self.ticker_request_count[ticker.upper()] += 1
+            
+            # Record recent request
+            request_info = {
+                "timestamp": datetime.now().isoformat(),
+                "endpoint": endpoint,
+                "ticker": ticker,
+                "response_time_ms": round(response_time * 1000, 2),
+                "cache_status": cache_status,
+                "error": error
+            }
+            self.recent_requests.append(request_info)
+            
+            # Performance tracking
+            if response_time > 0:
+                self.response_times[endpoint].append(response_time)
+                # Keep only last 50 response times per endpoint
+                if len(self.response_times[endpoint]) > 50:
+                    self.response_times[endpoint] = self.response_times[endpoint][-50:]
+            
+            # Cache tracking
+            if cache_status == "hit":
+                self.cache_hits += 1
+            elif cache_status == "miss":
+                self.cache_misses += 1
+            
+            # Error tracking
+            if error:
+                self.errors_by_endpoint[endpoint] += 1
+                error_info = {
+                    "timestamp": datetime.now().isoformat(),
+                    "endpoint": endpoint,
+                    "ticker": ticker
+                }
+                self.recent_errors.append(error_info)
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        with self.lock:
+            uptime = datetime.now() - self.start_time
+            
+            # Calculate average response times
+            avg_response_times = {}
+            for endpoint, times in self.response_times.items():
+                if times:
+                    avg_response_times[endpoint] = round(sum(times) / len(times) * 1000, 2)  # Convert to ms
+            
+            # Get top tickers
+            top_tickers = sorted(
+                self.ticker_request_count.items(), 
+                key=lambda x: x[1], 
+                reverse=True
+            )[:10]
+            
+            # Calculate requests per minute
+            total_minutes = max(uptime.total_seconds() / 60, 1)
+            requests_per_minute = round(self.total_requests / total_minutes, 2)
+            
+            # Cache hit rate
+            total_cache_requests = self.cache_hits + self.cache_misses
+            cache_hit_rate = round((self.cache_hits / total_cache_requests * 100), 2) if total_cache_requests > 0 else 0
+            
+            return {
+                "uptime": {
+                    "seconds": int(uptime.total_seconds()),
+                    "formatted": str(uptime).split('.')[0]  # Remove microseconds
+                },
+                "requests": {
+                    "total": self.total_requests,
+                    "per_minute": requests_per_minute,
+                    "by_endpoint": dict(self.requests_by_endpoint),
+                    "recent": list(self.recent_requests)[-10:]  # Last 10 requests
+                },
+                "performance": {
+                    "avg_response_times_ms": avg_response_times,
+                    "cache_hit_rate": cache_hit_rate,
+                    "cache_hits": self.cache_hits,
+                    "cache_misses": self.cache_misses
+                },
+                "tickers": {
+                    "top_requested": top_tickers,
+                    "unique_count": len(self.ticker_request_count)
+                },
+                "errors": {
+                    "by_endpoint": dict(self.errors_by_endpoint),
+                    "recent": list(self.recent_errors)[-5:]  # Last 5 errors
+                }
+            }
+
+# Global metrics instance
+metrics = MetricsCollector()
+
+# Middleware to track requests
+@app.before_request
+def before_request():
+    request.start_time = time.time()
+
+@app.after_request
+def after_request(response):
+    if hasattr(request, 'start_time'):
+        response_time = time.time() - request.start_time
+        
+        # Extract ticker from request args
+        ticker = request.args.get('ticker', None)
+        
+        # Get cache status from response (if it's JSON)
+        cache_status = None
+        try:
+            if response.content_type == 'application/json':
+                response_data = response.get_json()
+                if response_data and isinstance(response_data, dict):
+                    cache_status = response_data.get('cache_status')
+        except:
+            pass
+        
+        # Record metrics
+        metrics.record_request(
+            endpoint=request.endpoint or request.path,
+            ticker=ticker,
+            response_time=response_time,
+            cache_status=cache_status,
+            error=response.status_code >= 400
+        )
+    
+    return response
 
 # Configure logging
 logging.basicConfig(
@@ -1382,3 +1541,398 @@ def debug_basic_auth():
         
     except Exception as e:
         return jsonify({"error": str(e)})
+
+@app.route("/metrics", methods=["GET"])
+def get_metrics():
+    """Get comprehensive service metrics."""
+    try:
+        service_metrics = metrics.get_metrics()
+        cache_stats = cache_manager.get_cache_stats()
+        
+        return jsonify({
+            "timestamp": datetime.now().isoformat(),
+            "service": service_metrics,
+            "cache": cache_stats,
+            "system": {
+                "version": "2.4.0-redis-cache",
+                "data_source": "EODHD Professional",
+                "cache_backend": "Upstash Redis REST API"
+            }
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    """Serve the dashboard HTML page."""
+    return '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Technical Analysis Microservice Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: transform 0.3s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .stat-card h3 {
+            color: #4a5568;
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .stat-value {
+            font-size: 2rem;
+            font-weight: bold;
+            color: #2d3748;
+            margin-bottom: 10px;
+        }
+        
+        .stat-label {
+            color: #718096;
+            font-size: 0.9rem;
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-connected {
+            background-color: #48bb78;
+            animation: pulse 2s infinite;
+        }
+        
+        .status-error {
+            background-color: #f56565;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        
+        .recent-activity {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        
+        .activity-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            border-bottom: 1px solid #e2e8f0;
+            font-size: 0.9rem;
+        }
+        
+        .activity-item:last-child {
+            border-bottom: none;
+        }
+        
+        .ticker-badge {
+            background: #4299e1;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+        
+        .cache-hit {
+            color: #48bb78;
+            font-weight: bold;
+        }
+        
+        .cache-miss {
+            color: #ed8936;
+            font-weight: bold;
+        }
+        
+        .auto-refresh {
+            text-align: center;
+            color: white;
+            margin-top: 20px;
+            opacity: 0.8;
+        }
+        
+        .popular-tickers {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        .ticker-item {
+            background: #f7fafc;
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+            border-left: 4px solid #4299e1;
+        }
+        
+        .ticker-symbol {
+            font-weight: bold;
+            color: #2d3748;
+        }
+        
+        .ticker-count {
+            font-size: 0.8rem;
+            color: #718096;
+        }
+        
+        .error-badge {
+            background: #f56565;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 8px;
+            font-size: 0.7rem;
+        }
+        
+        .loading {
+            text-align: center;
+            color: white;
+            font-size: 1.2rem;
+            margin: 50px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Technical Analysis Dashboard</h1>
+            <p>Real-time monitoring of your microservice performance</p>
+        </div>
+        
+        <div id="loading" class="loading">
+            🔄 Loading dashboard data...
+        </div>
+        
+        <div id="dashboard-content" style="display: none;">
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <h3>🔗 Service Status</h3>
+                    <div class="stat-value">
+                        <span class="status-indicator" id="status-indicator"></span>
+                        <span id="service-status">Loading...</span>
+                    </div>
+                    <div class="stat-label">
+                        Uptime: <span id="uptime">--</span>
+                    </div>
+                </div>
+                
+                <div class="stat-card">
+                    <h3>📈 Total Requests</h3>
+                    <div class="stat-value" id="total-requests">0</div>
+                    <div class="stat-label">
+                        <span id="requests-per-minute">0</span> requests/min
+                    </div>
+                </div>
+                
+                <div class="stat-card">
+                    <h3>⚡ Cache Performance</h3>
+                    <div class="stat-value" id="cache-hit-rate">0%</div>
+                    <div class="stat-label">
+                        <span id="cache-hits">0</span> hits | <span id="cache-misses">0</span> misses
+                    </div>
+                </div>
+                
+                <div class="stat-card">
+                    <h3>💾 Redis Status</h3>
+                    <div class="stat-value" id="redis-status">Connecting...</div>
+                    <div class="stat-label">
+                        <span id="cache-keys">0</span> cached items
+                    </div>
+                </div>
+            </div>
+            
+            <div class="recent-activity">
+                <h3>🕒 Recent API Requests</h3>
+                <div id="recent-requests">
+                    <div class="activity-item">No recent requests</div>
+                </div>
+            </div>
+            
+            <div class="recent-activity">
+                <h3>🏆 Most Requested Tickers</h3>
+                <div class="popular-tickers" id="popular-tickers">
+                    <div class="ticker-item">No data yet</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="auto-refresh">
+            🔄 Auto-refreshing every 5 seconds
+        </div>
+    </div>
+
+    <script>
+        let refreshInterval;
+        
+        async function fetchMetrics() {
+            try {
+                const response = await fetch('/metrics');
+                const data = await response.json();
+                updateDashboard(data);
+                
+                // Hide loading and show content
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('dashboard-content').style.display = 'block';
+                
+            } catch (error) {
+                console.error('Failed to fetch metrics:', error);
+                document.getElementById('loading').innerHTML = '❌ Failed to load dashboard data';
+            }
+        }
+        
+        function updateDashboard(data) {
+            // Service status
+            const isHealthy = data.cache && data.cache.redis_status === 'connected';
+            document.getElementById('service-status').textContent = isHealthy ? 'Online' : 'Issues Detected';
+            document.getElementById('status-indicator').className = 
+                'status-indicator ' + (isHealthy ? 'status-connected' : 'status-error');
+            document.getElementById('uptime').textContent = data.service.uptime.formatted;
+            
+            // Request metrics
+            document.getElementById('total-requests').textContent = data.service.requests.total.toLocaleString();
+            document.getElementById('requests-per-minute').textContent = data.service.requests.per_minute;
+            
+            // Cache performance
+            document.getElementById('cache-hit-rate').textContent = data.service.performance.cache_hit_rate + '%';
+            document.getElementById('cache-hits').textContent = data.service.performance.cache_hits;
+            document.getElementById('cache-misses').textContent = data.service.performance.cache_misses;
+            
+            // Redis status
+            if (data.cache) {
+                document.getElementById('redis-status').textContent = 
+                    data.cache.redis_status === 'connected' ? 'Connected' : 'Disconnected';
+                document.getElementById('cache-keys').textContent = 
+                    data.cache.ta_cache_keys || 0;
+            }
+            
+            // Recent requests
+            updateRecentRequests(data.service.requests.recent || []);
+            
+            // Popular tickers
+            updatePopularTickers(data.service.tickers.top_requested || []);
+        }
+        
+        function updateRecentRequests(requests) {
+            const container = document.getElementById('recent-requests');
+            if (!requests.length) {
+                container.innerHTML = '<div class="activity-item">No recent requests</div>';
+                return;
+            }
+            
+            container.innerHTML = requests.reverse().map(req => `
+                <div class="activity-item">
+                    <div>
+                        <strong>${req.endpoint}</strong>
+                        ${req.ticker ? `<span class="ticker-badge">${req.ticker}</span>` : ''}
+                        ${req.error ? '<span class="error-badge">ERROR</span>' : ''}
+                    </div>
+                    <div>
+                        ${req.cache_status ? `<span class="cache-${req.cache_status}">${req.cache_status.toUpperCase()}</span> |` : ''}
+                        ${req.response_time_ms}ms |
+                        ${new Date(req.timestamp).toLocaleTimeString()}
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        function updatePopularTickers(tickers) {
+            const container = document.getElementById('popular-tickers');
+            if (!tickers.length) {
+                container.innerHTML = '<div class="ticker-item">No data yet</div>';
+                return;
+            }
+            
+            container.innerHTML = tickers.map(([ticker, count]) => `
+                <div class="ticker-item">
+                    <div class="ticker-symbol">${ticker}</div>
+                    <div class="ticker-count">${count} requests</div>
+                </div>
+            `).join('');
+        }
+        
+        // Initial load
+        fetchMetrics();
+        
+        // Auto-refresh every 5 seconds
+        refreshInterval = setInterval(fetchMetrics, 5000);
+        
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+        });
+    </script>
+</body>
+</html>
+    '''
