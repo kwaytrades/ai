@@ -73,8 +73,8 @@ class CacheManager:
             self.redis_client.ping()
             logger.info("Redis connection established successfully")
             
-        except redis.ConnectionError as e:
-            logger.error(f"Redis connection failed: {e}")
+        except (redis.ConnectionError, Exception) as e:
+            logger.warning(f"Redis connection failed, running without cache: {e}")
             self.redis_client = None
         
         self.scheduler = MarketScheduler()
