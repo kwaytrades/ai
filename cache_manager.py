@@ -60,24 +60,70 @@ class MarketScheduler:
 
 class CacheManager:
     def __init__(self):
+        # Try Upstash REST API first (most reliable for Upstash)
+        upstash_url = os.getenv('UPSTASH_REDIS_REST_URL')
+        upstash_token = os.getenv('UPSTASH_REDIS_REST_TOKEN')
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+        
+        self.redis_client = None
+        self.use_rest_api = False
+        
+        # Method 1: Try Upstash REST API
+        if upstash_url and upstash_token:
+            try:
+                logger.info("Attempting Upstash REST API connection...")
+                self.upstash_url = upstash_url.rstrip('/')
+                self.upstash_token = upstash_token
+                
+                # Test REST API connection
+                test_response = requests.post(
+                    f"{self.upstash_url}/ping",
+                    headers={"Authorization": f"Bearer {self.upstash_token}"},
+                    timeout=10
+                )
+                
+                if test_response.status_code == 200:
+                    logger.info("Upstash REST API connection successful!")
+                    self.use_rest_api = True
+                    
+                    # Initialize scheduler after successful connection
+                    self.scheduler = MarketScheduler()
+                    
+                    # Cache TTL settings (in seconds)
+                    self.cache_times = {
+                        "popular": int(os.getenv('CACHE_POPULAR_TTL', 1800)),      # 30 min
+                        "ondemand": int(os.getenv('CACHE_ONDEMAND_TTL', 300)),     # 5 min
+                        "afterhours": int(os.getenv('CACHE_AFTERHOURS_TTL', 3600)), # 1 hour
+                    }
+                    return
+                else:
+                    logger.warning(f"Upstash REST API test failed: {test_response.status_code}")
+                    
+            except Exception as e:
+                logger.warning(f"Upstash REST API connection failed: {e}")
+        
+        # Method 2: Try direct Redis with SSL
         try:
-            redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+            logger.info(f"Attempting direct Redis connection: {redis_url[:40]}...")
+            
             self.redis_client = redis.from_url(
                 redis_url,
-                decode_responses=True,  # Auto-decode responses
-                socket_connect_timeout=5,
-                socket_timeout=5,
+                decode_responses=True,
+                socket_connect_timeout=15,
+                socket_timeout=15,
+                ssl_cert_reqs=None,  # Disable SSL cert verification for Upstash
                 retry_on_timeout=True
             )
             
             # Test connection
-            self.redis_client.ping()
-            logger.info("Redis connection established successfully")
+            ping_result = self.redis_client.ping()
+            logger.info(f"Direct Redis connection successful! Ping: {ping_result}")
             
-        except (redis.ConnectionError, Exception) as e:
-            logger.warning(f"Redis connection failed, running without cache: {e}")
+        except Exception as e:
+            logger.error(f"Direct Redis connection failed: {type(e).__name__}: {str(e)}")
             self.redis_client = None
         
+        # Initialize scheduler and cache times regardless of connection method
         self.scheduler = MarketScheduler()
         
         # Cache TTL settings (in seconds)
@@ -160,10 +206,7 @@ class CacheManager:
                 # Use Upstash REST API with correct format
                 response = requests.post(
                     f"{self.upstash_url}/setex/{key}/{ttl}",
-                    headers={
-                        "Authorization": f"Bearer {self.upstash_token}",
-                        "Content-Type": "application/json"
-                    },
+                    headers={"Authorization": f"Bearer {self.upstash_token}"},
                     data=f'"{serialized_data}"',  # Upstash expects quoted JSON string
                     timeout=5
                 )
@@ -203,7 +246,7 @@ class CacheManager:
                 if interval and period:
                     # Invalidate specific cache
                     key = self.get_cache_key(ticker, interval, period)
-                    response = requests.post(
+                    response = requests.delete(
                         f"{self.upstash_url}/del/{key}",
                         headers={"Authorization": f"Bearer {self.upstash_token}"},
                         timeout=5
@@ -215,7 +258,7 @@ class CacheManager:
                 else:
                     # Get all keys for ticker and delete them
                     pattern = f"ta:{ticker.upper()}:*"
-                    keys_response = requests.post(
+                    keys_response = requests.get(
                         f"{self.upstash_url}/keys/{pattern}",
                         headers={"Authorization": f"Bearer {self.upstash_token}"},
                         timeout=5
@@ -227,7 +270,7 @@ class CacheManager:
                         
                         deleted_count = 0
                         for key in keys_to_delete:
-                            del_response = requests.post(
+                            del_response = requests.delete(
                                 f"{self.upstash_url}/del/{key}",
                                 headers={"Authorization": f"Bearer {self.upstash_token}"},
                                 timeout=5
@@ -271,15 +314,8 @@ class CacheManager:
             if self.use_rest_api:
                 # Using Upstash REST API
                 try:
-                    # Get basic info
-                    info_response = requests.post(
-                        f"{self.upstash_url}/info",
-                        headers={"Authorization": f"Bearer {self.upstash_token}"},
-                        timeout=5
-                    )
-                    
                     # Count keys
-                    keys_response = requests.post(
+                    keys_response = requests.get(
                         f"{self.upstash_url}/keys/ta:*",
                         headers={"Authorization": f"Bearer {self.upstash_token}"},
                         timeout=5
@@ -366,7 +402,7 @@ class CacheManager:
             return {
                 "status": "error",
                 "error": str(e),
-                "market_hours": self.scheduler.is_market_hours()
+                "market_hours": self.scheduler.is_market_hours() if hasattr(self, 'scheduler') else False
             }
 
 # Singleton instance
