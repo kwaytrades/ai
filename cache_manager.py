@@ -2,6 +2,7 @@ import redis
 import json
 import os
 import logging
+import requests
 from datetime import datetime, time, timedelta
 import pytz
 import holidays
@@ -103,56 +104,86 @@ class CacheManager:
             return self.cache_times["ondemand"]
     
     def get_cached_data(self, ticker: str, interval: str, period: str) -> Optional[Dict[Any, Any]]:
-        """Get cached data synchronously."""
-        if not self.redis_client:
-            return None
-            
+        """Get cached data using REST API or direct Redis."""
+        key = self.get_cache_key(ticker, interval, period)
+        
         try:
-            key = self.get_cache_key(ticker, interval, period)
-            cached = self.redis_client.get(key)
-            
-            if cached:
-                data = json.loads(cached)
-                logger.debug(f"Cache HIT for {key}")
-                return data
+            if self.use_rest_api:
+                # Use Upstash REST API
+                response = requests.post(
+                    f"{self.upstash_url}/get/{key}",
+                    headers={"Authorization": f"Bearer {self.upstash_token}"},
+                    timeout=5
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get('result'):
+                        data = json.loads(result['result'])
+                        logger.debug(f"REST API Cache HIT for {key}")
+                        return data
+                    else:
+                        logger.debug(f"REST API Cache MISS for {key}")
+                        return None
+                else:
+                    logger.warning(f"REST API get failed: {response.status_code}")
+                    return None
+                    
+            elif self.redis_client:
+                # Use direct Redis
+                cached = self.redis_client.get(key)
+                
+                if cached:
+                    data = json.loads(cached)
+                    logger.debug(f"Redis Cache HIT for {key}")
+                    return data
+                else:
+                    logger.debug(f"Redis Cache MISS for {key}")
+                    return None
             else:
-                logger.debug(f"Cache MISS for {key}")
                 return None
                 
-        except (redis.RedisError, json.JSONDecodeError) as e:
+        except Exception as e:
             logger.error(f"Cache get error for {ticker}: {e}")
             return None
     
     def set_cached_data(self, ticker: str, interval: str, period: str, data: Dict[Any, Any]) -> bool:
-        """Set cached data synchronously."""
-        if not self.redis_client:
-            return False
-            
+        """Set cached data using REST API or direct Redis."""
+        key = self.get_cache_key(ticker, interval, period)
+        ttl = self.get_cache_ttl(ticker)
+        
         try:
-            key = self.get_cache_key(ticker, interval, period)
-            ttl = self.get_cache_ttl(ticker)
-            
             # Serialize data with proper datetime handling
             serialized_data = json.dumps(data, default=self._json_serializer)
             
-            # Set main data
-            self.redis_client.setex(key, ttl, serialized_data)
-            
-            # Set metadata
-            meta_key = f"meta:{key}"
-            meta_data = {
-                "last_updated": datetime.now().isoformat(),
-                "ttl": ttl,
-                "is_popular": ticker.upper() in POPULAR_TICKERS,
-                "market_hours": self.scheduler.is_market_hours(),
-                "ticker": ticker.upper()
-            }
-            self.redis_client.setex(meta_key, ttl, json.dumps(meta_data))
-            
-            logger.debug(f"Cached {key} with TTL {ttl}s")
-            return True
-            
-        except (redis.RedisError, TypeError) as e:
+            if self.use_rest_api:
+                # Use Upstash REST API
+                response = requests.post(
+                    f"{self.upstash_url}/setex/{key}/{ttl}",
+                    headers={
+                        "Authorization": f"Bearer {self.upstash_token}",
+                        "Content-Type": "application/json"
+                    },
+                    json={"value": serialized_data},
+                    timeout=5
+                )
+                
+                if response.status_code == 200:
+                    logger.debug(f"REST API cached {key} with TTL {ttl}s")
+                    return True
+                else:
+                    logger.warning(f"REST API set failed: {response.status_code}")
+                    return False
+                    
+            elif self.redis_client:
+                # Use direct Redis
+                self.redis_client.setex(key, ttl, serialized_data)
+                logger.debug(f"Redis cached {key} with TTL {ttl}s")
+                return True
+            else:
+                return False
+                
+        except Exception as e:
             logger.error(f"Cache set error for {ticker}: {e}")
             return False
     
@@ -166,79 +197,171 @@ class CacheManager:
     
     def invalidate_cache(self, ticker: str, interval: str = None, period: str = None) -> bool:
         """Invalidate cache for specific ticker or data type."""
-        if not self.redis_client:
-            return False
-            
         try:
-            if interval and period:
-                # Invalidate specific cache
-                key = self.get_cache_key(ticker, interval, period)
-                keys_to_delete = [key, f"meta:{key}"]
+            if self.use_rest_api:
+                # Use REST API to delete keys
+                if interval and period:
+                    # Invalidate specific cache
+                    key = self.get_cache_key(ticker, interval, period)
+                    response = requests.post(
+                        f"{self.upstash_url}/del/{key}",
+                        headers={"Authorization": f"Bearer {self.upstash_token}"},
+                        timeout=5
+                    )
+                    success = response.status_code == 200
+                    if success:
+                        logger.info(f"REST API invalidated cache key: {key}")
+                    return success
+                else:
+                    # Get all keys for ticker and delete them
+                    pattern = f"ta:{ticker.upper()}:*"
+                    keys_response = requests.post(
+                        f"{self.upstash_url}/keys/{pattern}",
+                        headers={"Authorization": f"Bearer {self.upstash_token}"},
+                        timeout=5
+                    )
+                    
+                    if keys_response.status_code == 200:
+                        keys_result = keys_response.json()
+                        keys_to_delete = keys_result.get('result', [])
+                        
+                        deleted_count = 0
+                        for key in keys_to_delete:
+                            del_response = requests.post(
+                                f"{self.upstash_url}/del/{key}",
+                                headers={"Authorization": f"Bearer {self.upstash_token}"},
+                                timeout=5
+                            )
+                            if del_response.status_code == 200:
+                                deleted_count += 1
+                        
+                        logger.info(f"REST API invalidated {deleted_count} cache keys for {ticker}")
+                        return deleted_count > 0
+                    return False
+                    
+            elif self.redis_client:
+                # Use direct Redis
+                if interval and period:
+                    # Invalidate specific cache
+                    key = self.get_cache_key(ticker, interval, period)
+                    keys_to_delete = [key, f"meta:{key}"]
+                else:
+                    # Invalidate all cache for ticker
+                    pattern = f"ta:{ticker.upper()}:*"
+                    keys_to_delete = self.redis_client.keys(pattern)
+                    meta_keys = [f"meta:{key}" for key in keys_to_delete]
+                    keys_to_delete.extend(meta_keys)
+                
+                if keys_to_delete:
+                    deleted = self.redis_client.delete(*keys_to_delete)
+                    logger.info(f"Redis invalidated {deleted} cache keys for {ticker}")
+                    return deleted > 0
+                
+                return False
             else:
-                # Invalidate all cache for ticker
-                pattern = f"ta:{ticker.upper()}:*"
-                keys_to_delete = self.redis_client.keys(pattern)
-                meta_keys = [f"meta:{key}" for key in keys_to_delete]
-                keys_to_delete.extend(meta_keys)
-            
-            if keys_to_delete:
-                deleted = self.redis_client.delete(*keys_to_delete)
-                logger.info(f"Invalidated {deleted} cache keys for {ticker}")
-                return deleted > 0
-            
-            return False
-            
-        except redis.RedisError as e:
+                return False
+                
+        except Exception as e:
             logger.error(f"Cache invalidation error: {e}")
             return False
     
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get comprehensive cache statistics."""
         try:
-            if not self.redis_client:
+            if self.use_rest_api:
+                # Using Upstash REST API
+                try:
+                    # Get basic info
+                    info_response = requests.post(
+                        f"{self.upstash_url}/info",
+                        headers={"Authorization": f"Bearer {self.upstash_token}"},
+                        timeout=5
+                    )
+                    
+                    # Count keys
+                    keys_response = requests.post(
+                        f"{self.upstash_url}/keys/ta:*",
+                        headers={"Authorization": f"Bearer {self.upstash_token}"},
+                        timeout=5
+                    )
+                    
+                    ta_keys = 0
+                    if keys_response.status_code == 200:
+                        keys_result = keys_response.json()
+                        ta_keys = len(keys_result.get('result', []))
+                    
+                    return {
+                        "redis_status": "connected",
+                        "connection_type": "upstash_rest_api",
+                        "ta_cache_keys": ta_keys,
+                        "cache_config": {
+                            "popular_ttl": self.cache_times["popular"],
+                            "ondemand_ttl": self.cache_times["ondemand"], 
+                            "afterhours_ttl": self.cache_times["afterhours"]
+                        },
+                        "market_info": {
+                            "is_market_hours": self.scheduler.is_market_hours(),
+                            "next_market_open": self.scheduler.next_market_open().isoformat(),
+                            "timezone": str(self.scheduler.timezone)
+                        },
+                        "popular_tickers": {
+                            "total_count": len(POPULAR_TICKERS),
+                            "sample": POPULAR_TICKERS[:5]
+                        }
+                    }
+                    
+                except Exception as e:
+                    return {
+                        "redis_status": "connected",
+                        "connection_type": "upstash_rest_api",
+                        "error": str(e)
+                    }
+            
+            elif self.redis_client:
+                # Using direct Redis connection
+                info = self.redis_client.info()
+                
+                # Count different types of keys
+                ta_keys = len(self.redis_client.keys("ta:*"))
+                meta_keys = len(self.redis_client.keys("meta:*"))
+                
+                # Popular ticker cache status
+                popular_cached = 0
+                for ticker in POPULAR_TICKERS[:10]:  # Check first 10
+                    pattern = f"ta:{ticker}:*"
+                    if self.redis_client.keys(pattern):
+                        popular_cached += 1
+                
+                return {
+                    "redis_status": "connected",
+                    "connection_type": "direct_redis",
+                    "total_keys": info.get('db0', {}).get('keys', 0) if 'db0' in info else 0,
+                    "ta_cache_keys": ta_keys,
+                    "meta_keys": meta_keys,
+                    "memory_used": info.get('used_memory_human', 'N/A'),
+                    "memory_peak": info.get('used_memory_peak_human', 'N/A'),
+                    "connected_clients": info.get('connected_clients', 0),
+                    "total_commands_processed": info.get('total_commands_processed', 0),
+                    "cache_config": {
+                        "popular_ttl": self.cache_times["popular"],
+                        "ondemand_ttl": self.cache_times["ondemand"], 
+                        "afterhours_ttl": self.cache_times["afterhours"]
+                    },
+                    "market_info": {
+                        "is_market_hours": self.scheduler.is_market_hours(),
+                        "next_market_open": self.scheduler.next_market_open().isoformat(),
+                        "timezone": str(self.scheduler.timezone)
+                    },
+                    "popular_tickers": {
+                        "total_count": len(POPULAR_TICKERS),
+                        "cached_count": popular_cached,
+                        "sample": POPULAR_TICKERS[:5]
+                    }
+                }
+            else:
                 return {"status": "redis_unavailable"}
                 
-            # Basic Redis stats
-            info = self.redis_client.info()
-            
-            # Count different types of keys
-            ta_keys = len(self.redis_client.keys("ta:*"))
-            meta_keys = len(self.redis_client.keys("meta:*"))
-            
-            # Popular ticker cache status
-            popular_cached = 0
-            for ticker in POPULAR_TICKERS[:10]:  # Check first 10
-                pattern = f"ta:{ticker}:*"
-                if self.redis_client.keys(pattern):
-                    popular_cached += 1
-            
-            return {
-                "redis_status": "connected",
-                "total_keys": info.get('db0', {}).get('keys', 0) if 'db0' in info else 0,
-                "ta_cache_keys": ta_keys,
-                "meta_keys": meta_keys,
-                "memory_used": info.get('used_memory_human', 'N/A'),
-                "memory_peak": info.get('used_memory_peak_human', 'N/A'),
-                "connected_clients": info.get('connected_clients', 0),
-                "total_commands_processed": info.get('total_commands_processed', 0),
-                "cache_config": {
-                    "popular_ttl": self.cache_times["popular"],
-                    "ondemand_ttl": self.cache_times["ondemand"], 
-                    "afterhours_ttl": self.cache_times["afterhours"]
-                },
-                "market_info": {
-                    "is_market_hours": self.scheduler.is_market_hours(),
-                    "next_market_open": self.scheduler.next_market_open().isoformat(),
-                    "timezone": str(self.scheduler.timezone)
-                },
-                "popular_tickers": {
-                    "total_count": len(POPULAR_TICKERS),
-                    "cached_count": popular_cached,
-                    "sample": POPULAR_TICKERS[:5]
-                }
-            }
-            
-        except redis.RedisError as e:
+        except Exception as e:
             logger.error(f"Error getting cache stats: {e}")
             return {
                 "status": "error",
