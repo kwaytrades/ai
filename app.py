@@ -1304,8 +1304,9 @@ def debug_rest_api():
                 "result": get_response.json() if get_response.status_code == 200 else None
             },
             "cache_manager_status": {
-                "use_rest_api": cache_manager.use_rest_api,
-                "redis_client_exists": cache_manager.redis_client is not None
+                "use_rest_api": getattr(cache_manager, 'use_rest_api', False),
+                "redis_client_exists": getattr(cache_manager, 'redis_client', None) is not None,
+                "cache_manager_type": type(cache_manager).__name__
             }
         })
         
