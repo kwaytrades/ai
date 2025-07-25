@@ -1159,3 +1159,99 @@ def debug_env():
                         for k, v in os.environ.items() 
                         if 'REDIS' in k.upper() or 'EODHD' in k.upper()}
     })
+
+@app.route("/debug/redis-connect", methods=["GET"])
+def debug_redis_connect():
+    """Test Redis connection with detailed error reporting."""
+    import redis
+    import traceback
+    
+    redis_url = os.getenv('REDIS_URL')
+    
+    results = {
+        "redis_url_length": len(redis_url),
+        "tests": {}
+    }
+    
+    # Test 1: Basic connection
+    try:
+        r1 = redis.from_url(redis_url, decode_responses=True)
+        ping1 = r1.ping()
+        results["tests"]["basic_connection"] = {"success": True, "ping": ping1}
+    except Exception as e:
+        results["tests"]["basic_connection"] = {
+            "success": False, 
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+    
+    # Test 2: Connection with longer timeout
+    try:
+        r2 = redis.from_url(
+            redis_url, 
+            decode_responses=True,
+            socket_connect_timeout=15,
+            socket_timeout=15
+        )
+        ping2 = r2.ping()
+        results["tests"]["long_timeout"] = {"success": True, "ping": ping2}
+    except Exception as e:
+        results["tests"]["long_timeout"] = {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+    
+    # Test 3: Try with SSL (rediss://)
+    try:
+        ssl_url = redis_url.replace('redis://', 'rediss://')
+        r3 = redis.from_url(ssl_url, decode_responses=True)
+        ping3 = r3.ping()
+        results["tests"]["ssl_connection"] = {"success": True, "ping": ping3}
+    except Exception as e:
+        results["tests"]["ssl_connection"] = {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+    
+    # Test 4: Check what cache_manager shows
+    results["cache_manager_status"] = {
+        "redis_client_exists": cache_manager.redis_client is not None,
+        "cache_manager_type": type(cache_manager.redis_client).__name__ if cache_manager.redis_client else "None"
+    }
+    
+    return jsonify(results)
+
+@app.route("/debug/simple-redis", methods=["GET"])
+def debug_simple_redis():
+    """Super simple Redis test."""
+    import redis
+    
+    redis_url = os.getenv('REDIS_URL')
+    
+    try:
+        # Create client
+        client = redis.from_url(redis_url, decode_responses=True)
+        
+        # Test ping
+        ping_result = client.ping()
+        
+        # Test simple set/get
+        client.set("test_key_simple", "hello_world", ex=60)
+        get_result = client.get("test_key_simple")
+        
+        return jsonify({
+            "connection_success": True,
+            "ping_result": ping_result,
+            "set_get_test": get_result == "hello_world",
+            "get_result": get_result
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "connection_success": False,
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        })
