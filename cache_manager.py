@@ -110,7 +110,7 @@ class CacheManager:
         try:
             if self.use_rest_api:
                 # Use Upstash REST API
-                response = requests.post(
+                response = requests.get(
                     f"{self.upstash_url}/get/{key}",
                     headers={"Authorization": f"Bearer {self.upstash_token}"},
                     timeout=5
@@ -157,14 +157,14 @@ class CacheManager:
             serialized_data = json.dumps(data, default=self._json_serializer)
             
             if self.use_rest_api:
-                # Use Upstash REST API
+                # Use Upstash REST API with correct format
                 response = requests.post(
                     f"{self.upstash_url}/setex/{key}/{ttl}",
                     headers={
                         "Authorization": f"Bearer {self.upstash_token}",
                         "Content-Type": "application/json"
                     },
-                    json={"value": serialized_data},
+                    data=f'"{serialized_data}"',  # Upstash expects quoted JSON string
                     timeout=5
                 )
                 
@@ -172,7 +172,7 @@ class CacheManager:
                     logger.debug(f"REST API cached {key} with TTL {ttl}s")
                     return True
                 else:
-                    logger.warning(f"REST API set failed: {response.status_code}")
+                    logger.warning(f"REST API set failed: {response.status_code} - {response.text}")
                     return False
                     
             elif self.redis_client:
