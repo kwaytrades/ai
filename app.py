@@ -2255,3 +2255,222 @@ def dashboard():
 </body>
 </html>
     '''
+
+# Add these imports and endpoints to your main app.py file
+
+from models.user import UserManager
+from services.ta_client import TAServiceClient
+from services.message_analyzer import MessageAnalyzer
+from services.response_generator import ResponseGenerator
+
+# Initialize services
+user_manager = UserManager()
+ta_client = TAServiceClient()
+message_analyzer = MessageAnalyzer()
+response_generator = ResponseGenerator()
+
+# SMS webhook endpoint
+@app.post("/webhook/sms")
+async def handle_sms(request: Request):
+    """Enhanced SMS handler with proper user management"""
+    form = await request.form()
+    from_number = form.get('From')
+    message_body = form.get('Body', '').strip()
+    
+    logger.info(f"📱 SMS from {from_number}: {message_body}")
+    
+    try:
+        # Get or create user
+        user = user_manager.get_or_create_user(from_number)
+        
+        # Check message limits
+        limit_check = user_manager.check_message_limits(from_number)
+        
+        if not limit_check["can_send"]:
+            # Send limit exceeded message
+            limit_message = f"You've reached your {limit_check['plan']} plan limit ({limit_check['used']}/{limit_check['limit']} messages). "
+            
+            if user.get('plan_type') == 'free':
+                limit_message += "Upgrade to paid ($29/month) for 100 messages! Reply UPGRADE"
+            elif user.get('plan_type') == 'paid':
+                limit_message += "Upgrade to Pro ($99/month) for unlimited! Reply UPGRADE"
+            else:
+                limit_message += f"Daily cooloff active. Resets in {limit_check.get('resets_in_hours', 24):.1f} hours."
+            
+            twiml_response = MessagingResponse()
+            twiml_response.message(limit_message)
+            return Response(content=str(twiml_response), media_type="application/xml")
+        
+        # Update user activity
+        user_manager.update_user_activity(from_number, "received")
+        
+        # Analyze message intent
+        intent = message_analyzer.detect_intent(message_body)
+        
+        # Learn from interaction
+        user_manager.learn_from_interaction(
+            from_number, 
+            message_body, 
+            intent.symbols, 
+            intent.action
+        )
+        
+        # Fetch TA data if needed
+        ta_data = None
+        if intent.symbols and intent.action in ['analyze', 'price', 'technical']:
+            symbol = intent.symbols[0]
+            ta_data = await ta_client.get_stock_analysis(symbol)
+        
+        # Generate personalized response
+        response_text = await response_generator.generate_personalized_response(
+            message_body, intent, ta_data, user
+        )
+        
+        # Log conversation
+        user_manager.log_conversation(
+            from_number, message_body, response_text, intent.action, intent.symbols
+        )
+        
+        # Send response
+        twiml_response = MessagingResponse()
+        twiml_response.message(response_text)
+        
+        # Update sent message count
+        user_manager.update_user_activity(from_number, "sent")
+        
+        logger.info(f"✅ Sent response to {from_number}: {response_text[:50]}...")
+        
+        return Response(content=str(twiml_response), media_type="application/xml")
+        
+    except Exception as e:
+        logger.error(f"💥 SMS handler error: {e}")
+        
+        twiml_response = MessagingResponse()
+        twiml_response.message("Sorry, I'm having technical difficulties. Please try again in a moment!")
+        return Response(content=str(twiml_response), media_type="application/xml")
+
+# Debug and admin endpoints
+@app.get("/debug/database")
+async def debug_database():
+    """Debug database connections and collections"""
+    try:
+        # Test connection
+        user_count_ai = user_manager.db.users.count_documents({})
+        collections = user_manager.db.list_collection_names()
+        
+        # Test user retrieval
+        sample_user = user_manager.db.users.find_one()
+        
+        return {
+            "database_name": user_manager.db.name,
+            "collections": collections,
+            "users_count": user_count_ai,
+            "sample_user_phone": sample_user.get("phone_number") if sample_user else None,
+            "sample_user_fields": list(sample_user.keys()) if sample_user else [],
+            "connection_status": "connected"
+        }
+    except Exception as e:
+        return {"error": str(e), "connection_status": "failed"}
+
+@app.get("/debug/user/{phone_number}")
+async def debug_user(phone_number: str):
+    """Debug specific user data"""
+    try:
+        user = user_manager.get_user_by_phone(phone_number)
+        if user:
+            user["_id"] = str(user["_id"])  # Convert ObjectId to string
+            return {
+                "found": True,
+                "user": user,
+                "fields_count": len(user.keys()),
+                "has_message_tracking": all(field in user for field in ["total_messages_sent", "total_messages_received"]),
+                "has_communication_style": "communication_style" in user and isinstance(user["communication_style"], dict)
+            }
+        else:
+            return {"found": False, "phone_number": phone_number}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/debug/test-activity/{phone_number}")
+async def test_user_activity(phone_number: str):
+    """Test user activity update"""
+    try:
+        # Ensure user exists
+        user = user_manager.get_or_create_user(phone_number)
+        
+        # Test activity update
+        success = user_manager.update_user_activity(phone_number, "received")
+        
+        # Get updated user
+        updated_user = user_manager.get_user_by_phone(phone_number)
+        
+        return {
+            "update_success": success,
+            "total_messages_received": updated_user.get("total_messages_received"),
+            "total_messages_sent": updated_user.get("total_messages_sent"),
+            "messages_this_period": updated_user.get("messages_this_period"),
+            "last_active_at": updated_user.get("last_active_at"),
+            "updated_at": updated_user.get("updated_at")
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/debug/limits/{phone_number}")
+async def debug_limits(phone_number: str):
+    """Debug user limits"""
+    try:
+        limit_check = user_manager.check_message_limits(phone_number)
+        return limit_check
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/debug/analyze-intent")
+async def debug_analyze_intent(request: Request):
+    """Debug intent analysis"""
+    try:
+        data = await request.json()
+        message = data.get('message', '')
+        
+        intent = message_analyzer.detect_intent(message)
+        
+        return {
+            "message": message,
+            "intent": intent.action,
+            "symbols": intent.symbols,
+            "parameters": intent.parameters,
+            "confidence": intent.confidence
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# User management endpoints
+@app.get("/admin/users/{phone_number}")
+async def get_user_profile(phone_number: str):
+    """Get user profile for admin"""
+    user = user_manager.get_user_by_phone(phone_number)
+    if user:
+        # Convert ObjectId to string for JSON serialization
+        user["_id"] = str(user["_id"])
+        return user
+    return {"error": "User not found"}
+
+@app.get("/admin/users/stats")
+async def get_user_stats():
+    """Get user statistics"""
+    return user_manager.get_user_stats()
+
+@app.post("/admin/users/{phone_number}/subscription")
+async def update_user_subscription(phone_number: str, request: Request):
+    """Update user subscription"""
+    try:
+        plan_data = await request.json()
+        success = user_manager.update_subscription(
+            phone_number,
+            plan_data.get('plan_type'),
+            plan_data.get('stripe_customer_id'),
+            plan_data.get('stripe_subscription_id')
+        )
+        
+        return {"success": success}
+    except Exception as e:
+        return {"error": str(e)}
